@@ -177,32 +177,74 @@ function EditModal({ item, fields, title, onSave, onClose }) {
   );
 }
 
-// ─── ASSET CARD ──────────────────────────────────────────────────────────────
-function AssetCard({ asset, onLog, onHistory, onEdit, onDelete }) {
-  const { pm } = asset;
+// ─── CONFIRM DELETE MODAL ────────────────────────────────────────────────────
+function ConfirmDelete({ name, onConfirm, onClose }) {
   return (
-    <div style={{ background:"rgba(255,255,255,0.65)", border:`1.5px solid ${pm.color}30`, borderRadius:20, padding:18, backdropFilter:"blur(24px)", WebkitBackdropFilter:"blur(24px)", boxShadow:`0 4px 24px ${pm.color}12, inset 0 1px 0 rgba(255,255,255,0.9)`, display:"flex",flexDirection:"column",gap:6 }}>
-      <div style={{ display:"flex",justifyContent:"space-between",alignItems:"flex-start" }}>
-        <span style={{ fontSize:22,color:CAT_COLOR[asset.category] }}>{CAT_ICON[asset.category]}</span>
-        <span style={{ fontSize:9,fontWeight:800,letterSpacing:1,padding:"3px 9px",borderRadius:20,color:pm.color,background:pm.color+"18",border:`1px solid ${pm.color}30` }}>{pm.label}</span>
-      </div>
-      <div style={{ fontWeight:800,fontSize:15,color:"#1e1b4b",lineHeight:1.2,marginTop:2 }}>{asset.name}</div>
-      <div style={{ fontSize:11,color:"#94a3b8" }}>{asset.location}</div>
-      <div style={{ fontSize:12,color:"#64748b" }}>{asset.detail}</div>
-      {asset.pmEnabled && (
-        <div style={{ display:"flex",justifyContent:"space-between",marginTop:4 }}>
-          <span style={{ fontSize:10,color:"#cbd5e1" }}>Every {asset.intervalDays}d</span>
-          {pm.days!==null && <span style={{ fontSize:11,color:pm.color,fontWeight:700 }}>{pm.days<0?`${Math.abs(pm.days)}d past due`:`${pm.days}d left`}</span>}
+    <Overlay onClose={onClose}>
+      <div style={{ textAlign:"center" }}>
+        <div style={{ fontSize:40,marginBottom:12 }}>🗑</div>
+        <div style={{ fontWeight:800,fontSize:18,color:"#1e1b4b",marginBottom:8 }}>Delete Permanently?</div>
+        <div style={{ fontSize:14,color:"#64748b",marginBottom:6 }}>
+          <strong style={{color:"#1e1b4b"}}>{name}</strong>
         </div>
-      )}
-      {pm.next && <div style={{ fontSize:10,color:"#cbd5e1" }}>Next: <span style={{color:pm.color}}>{dStr(pm.next)}</span></div>}
-      <div style={{ display:"flex",gap:6,marginTop:10,flexWrap:"wrap" }}>
-        <button onClick={onHistory} style={S.cGhost}>History</button>
-        <button onClick={onEdit} style={{ ...S.cGhost,color:"#7c3aed" }}>Edit</button>
-        <button onClick={onDelete} style={{ ...S.cGhost,color:"#f87171",borderColor:"#f8717130" }}>✕</button>
-        <button onClick={onLog} style={S.cPrimary}>Log PM</button>
+        <div style={{ fontSize:13,color:"#94a3b8",marginBottom:24 }}>
+          This removes the asset and all its PM history forever.<br/>
+          Use <strong>Hide</strong> instead to just remove it from the dashboard.
+        </div>
+        <div style={{ display:"flex",gap:10 }}>
+          <button onClick={onClose} style={{ ...S.btnG,flex:1 }}>Cancel</button>
+          <button onClick={onConfirm} style={{ flex:2,padding:"11px 20px",background:"rgba(239,68,68,0.1)",border:"1.5px solid rgba(239,68,68,0.4)",color:"#ef4444",cursor:"pointer",fontFamily:"inherit",fontWeight:800,fontSize:13,borderRadius:14 }}>
+            Yes, Delete Forever
+          </button>
+        </div>
       </div>
-    </div>
+    </Overlay>
+  );
+}
+
+// ─── ASSET CARD ──────────────────────────────────────────────────────────────
+function AssetCard({ asset, onLog, onHistory, onEdit, onDismiss, onDelete, dismissed }) {
+  const { pm } = asset;
+  const [confirmingDelete, setConfirmingDelete] = useState(false);
+  return (
+    <>
+      {confirmingDelete && (
+        <ConfirmDelete
+          name={asset.name}
+          onConfirm={onDelete}
+          onClose={()=>setConfirmingDelete(false)}
+        />
+      )}
+      <div style={{ background: dismissed ? "rgba(255,255,255,0.35)" : "rgba(255,255,255,0.65)", border:`1.5px solid ${dismissed ? "rgba(148,163,184,0.2)" : pm.color+"30"}`, borderRadius:20, padding:18, backdropFilter:"blur(24px)", WebkitBackdropFilter:"blur(24px)", boxShadow:`0 4px 24px ${pm.color}12, inset 0 1px 0 rgba(255,255,255,0.9)`, display:"flex",flexDirection:"column",gap:6, opacity: dismissed ? 0.65 : 1 }}>
+        <div style={{ display:"flex",justifyContent:"space-between",alignItems:"flex-start" }}>
+          <span style={{ fontSize:22,color:CAT_COLOR[asset.category] }}>{CAT_ICON[asset.category]}</span>
+          <div style={{ display:"flex",gap:6,alignItems:"center" }}>
+            {dismissed && <span style={{ fontSize:9,fontWeight:800,letterSpacing:1,padding:"3px 9px",borderRadius:20,color:"#94a3b8",background:"rgba(148,163,184,0.15)",border:"1px solid rgba(148,163,184,0.3)" }}>Hidden</span>}
+            {!dismissed && <span style={{ fontSize:9,fontWeight:800,letterSpacing:1,padding:"3px 9px",borderRadius:20,color:pm.color,background:pm.color+"18",border:`1px solid ${pm.color}30` }}>{pm.label}</span>}
+          </div>
+        </div>
+        <div style={{ fontWeight:800,fontSize:15,color:"#1e1b4b",lineHeight:1.2,marginTop:2 }}>{asset.name}</div>
+        <div style={{ fontSize:11,color:"#94a3b8" }}>{asset.location}</div>
+        <div style={{ fontSize:12,color:"#64748b" }}>{asset.detail}</div>
+        {!dismissed && asset.pmEnabled && (
+          <div style={{ display:"flex",justifyContent:"space-between",marginTop:4 }}>
+            <span style={{ fontSize:10,color:"#cbd5e1" }}>Every {asset.intervalDays}d</span>
+            {pm.days!==null && <span style={{ fontSize:11,color:pm.color,fontWeight:700 }}>{pm.days<0?`${Math.abs(pm.days)}d past due`:`${pm.days}d left`}</span>}
+          </div>
+        )}
+        {!dismissed && pm.next && <div style={{ fontSize:10,color:"#cbd5e1" }}>Next: <span style={{color:pm.color}}>{dStr(pm.next)}</span></div>}
+        <div style={{ display:"flex",gap:6,marginTop:10,flexWrap:"wrap" }}>
+          {!dismissed && <button onClick={onHistory} style={S.cGhost}>History</button>}
+          <button onClick={onEdit} style={{ ...S.cGhost,color:"#7c3aed" }}>Edit</button>
+          {dismissed
+            ? <button onClick={onDismiss} style={{ ...S.cGhost,color:"#10b981",borderColor:"rgba(16,185,129,0.3)" }}>↩ Restore</button>
+            : <button onClick={onDismiss} style={{ ...S.cGhost,color:"#f59e0b",borderColor:"rgba(245,158,11,0.3)" }}>Hide</button>
+          }
+          <button onClick={()=>setConfirmingDelete(true)} style={{ ...S.cGhost,color:"#f87171",borderColor:"#f8717130" }}>🗑 Delete</button>
+          {!dismissed && <button onClick={onLog} style={S.cPrimary}>Log PM</button>}
+        </div>
+      </div>
+    </>
   );
 }
 
@@ -720,6 +762,7 @@ export default function App() {
   const [logNote,    setNote]       = useState("");
   const [logDate,    setDate]       = useState(TODAY);
   const [toast,      setToast]      = useState(null);
+  const [showHidden, setShowHidden] = useState(false);
   const [addForm,    setForm]       = useState({ name:"",location:"",category:"Filter",detail:"",intervalDays:30,pmEnabled:true });
 
   useEffect(() => { save("cbv3_assets",    assets);    }, [assets]);
@@ -744,7 +787,8 @@ export default function App() {
     setForm({ name:"",location:"",category:"Filter",detail:"",intervalDays:30,pmEnabled:true });
   }
 
-  function deleteAsset(id) { setAssets(p=>p.filter(a=>a.id!==id)); setLogs(p=>p.filter(l=>l.assetId!==id)); showToast("Asset removed"); }
+  function dismissAsset(id) { setAssets(p=>p.map(a=>a.id===id?{...a,dismissed:!a.dismissed}:a)); }
+  function deleteAsset(id)  { setAssets(p=>p.filter(a=>a.id!==id)); setLogs(p=>p.filter(l=>l.assetId!==id)); showToast("Asset permanently deleted"); }
 
   const enriched = assets.map(a=>({...a,pm:getPM(a,logs)}));
   const overdue  = enriched.filter(a=>a.pm.label==="Overdue"||a.pm.label==="Never logged");
@@ -752,7 +796,9 @@ export default function App() {
   const ok       = enriched.filter(a=>a.pm.label==="OK");
   const cats     = ["All",...Array.from(new Set(assets.map(a=>a.category)))];
   const sorted   = [...enriched].sort((a,b)=>{ const o={"Never logged":0,"Overdue":1,"Due soon":2,"OK":3,"Log only":4}; return o[a.pm.label]-o[b.pm.label]; });
-  const displayed = catFilter==="All" ? sorted : sorted.filter(a=>a.category===catFilter);
+  const visibleSorted = showHidden ? sorted : sorted.filter(a=>!a.dismissed);
+  const displayed = catFilter==="All" ? visibleSorted : visibleSorted.filter(a=>a.category===catFilter);
+  const hiddenCount = enriched.filter(a=>a.dismissed).length;
 
   const assetEditFields = [
     { key:"name",        label:"Name" },
@@ -893,12 +939,21 @@ export default function App() {
             <div style={S.catRow}>
               {cats.map(c=><button key={c} onClick={()=>setCat(c)} style={{...S.catBtn,...(catFilter===c?S.catOn:{})}}>{c!=="All"&&CAT_ICON[c]} {c}</button>)}
             </div>
+            <div style={{ display:"flex",justifyContent:"flex-end",marginBottom:8 }}>
+              {hiddenCount > 0 && (
+                <button onClick={()=>setShowHidden(h=>!h)} style={{ padding:"6px 14px",borderRadius:20,border:"1px solid rgba(245,158,11,0.3)",background: showHidden?"rgba(245,158,11,0.1)":"rgba(255,255,255,0.6)",color:showHidden?"#f59e0b":"#94a3b8",fontSize:12,cursor:"pointer",fontFamily:"inherit",fontWeight:600 }}>
+                  {showHidden ? `👁 Hiding ${hiddenCount} shown` : `👁 ${hiddenCount} hidden`}
+                </button>
+              )}
+            </div>
             <div style={S.grid}>
               {displayed.map(a=>(
                 <AssetCard key={a.id} asset={a}
+                  dismissed={!!a.dismissed}
                   onLog={()=>setLog(a)}
                   onHistory={()=>setHist(a)}
                   onEdit={()=>setEditAsset(a)}
+                  onDismiss={()=>dismissAsset(a.id)}
                   onDelete={()=>deleteAsset(a.id)} />
               ))}
             </div>
