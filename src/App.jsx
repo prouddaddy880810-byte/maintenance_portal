@@ -207,156 +207,324 @@ function AssetCard({ asset, onLog, onHistory, onEdit, onDelete }) {
 }
 
 // ─── MACHINE DATABASE TAB ────────────────────────────────────────────────────
+const MACHINE_EDIT_FIELDS = [
+  { key:"name",          label:"Machine Name" },
+  { key:"assetTag",      label:"Asset Tag / ID" },
+  { key:"location",      label:"Location / Building" },
+  { key:"make",          label:"Make / Manufacturer" },
+  { key:"model",         label:"Model" },
+  { key:"serialNumber",  label:"Serial Number" },
+  { key:"partNumber",    label:"Part Number" },
+  { key:"voltage",       label:"Voltage" },
+  { key:"amperage",      label:"Amperage" },
+  { key:"horsepower",    label:"Horsepower" },
+  { key:"rpm",           label:"RPM" },
+  { key:"phase",         label:"Phase" },
+  { key:"year",          label:"Year" },
+  { key:"category",      label:"Category", type:"select", options:["Machine","Equipment","Electrical","Asset","Safety","Filter"] },
+  { key:"pmIntervalDays",label:"PM Interval (days)", type:"number" },
+  { key:"description",   label:"Notes / Description", type:"textarea" },
+];
+
+function parsedToMachine(preview) {
+  return {
+    id: Date.now(),
+    name: preview.suggestedName || "",
+    assetTag: preview.suggestedId || "",
+    make: preview.make || "", model: preview.model || "",
+    serialNumber: preview.serialNumber || "", partNumber: preview.partNumber || "",
+    voltage: preview.voltage || "", amperage: preview.amperage || "",
+    horsepower: preview.horsepower || "", rpm: preview.rpm || "",
+    phase: preview.phase || "", hz: preview.hz || "",
+    weight: preview.weight || "", year: preview.year || "",
+    category: preview.category || "Machine",
+    description: preview.description || "",
+    pmIntervalDays: preview.pmIntervalDays || "",
+    additionalSpecs: preview.additionalSpecs || {},
+    photos: preview._photo ? [{ url: preview._photo, addedAt: new Date().toISOString(), label: "Nameplate" }] : [],
+    addedAt: new Date().toISOString(),
+    location: "",
+  };
+}
+
+// Merge new parsed data into an existing machine (add photo, fill in blanks)
+function mergeIntoMachine(existing, preview) {
+  const newPhoto = preview._photo ? { url: preview._photo, addedAt: new Date().toISOString(), label: "Additional nameplate" } : null;
+  return {
+    ...existing,
+    // Only fill in fields that are currently empty
+    make:         existing.make         || preview.make         || "",
+    model:        existing.model        || preview.model        || "",
+    serialNumber: existing.serialNumber || preview.serialNumber || "",
+    partNumber:   existing.partNumber   || preview.partNumber   || "",
+    voltage:      existing.voltage      || preview.voltage      || "",
+    amperage:     existing.amperage     || preview.amperage     || "",
+    horsepower:   existing.horsepower   || preview.horsepower   || "",
+    rpm:          existing.rpm          || preview.rpm          || "",
+    phase:        existing.phase        || preview.phase        || "",
+    year:         existing.year         || preview.year         || "",
+    photos: newPhoto ? [...(existing.photos||[]), newPhoto] : (existing.photos||[]),
+    updatedAt: new Date().toISOString(),
+  };
+}
+
 function MachineDB({ machines, setMachines, showToast }) {
-  const [scanning, setScanning] = useState(false);
-  const [preview, setPreview]   = useState(null);
-  const [editM, setEditM]       = useState(null);
-  const [filter, setFilter]     = useState("All");
+  const [scanning,    setScanning]    = useState(false);
+  const [preview,     setPreview]     = useState(null);   // parsed AI result waiting for decision
+  const [decision,    setDecision]    = useState(null);   // "new" | "existing"
+  const [editM,       setEditM]       = useState(null);   // machine open in edit modal
+  const [mergeTarget, setMergeTarget] = useState(null);   // machine to merge into
+  const [filter,      setFilter]      = useState("All");
+  const [search,      setSearch]      = useState("");
+  const [sessionLog,  setSessionLog]  = useState([]);     // today's scan session
+  const [sessionMode, setSessionMode] = useState(false);
 
   const handleScan = useCallback(async (base64, dataUrl) => {
     setScanning(true);
+    setPreview(null);
+    setDecision(null);
+    setMergeTarget(null);
     try {
       const parsed = await aiParseImage(base64, NAMEPLATE_PROMPT);
       if (!parsed) throw new Error("parse failed");
-      setPreview({ ...parsed, _photo: dataUrl, _base64: base64 });
+      setPreview({ ...parsed, _photo: dataUrl });
     } catch {
-      showToast("⚠️ Couldn't read nameplate — try better lighting");
+      showToast("⚠️ Couldn't read nameplate — try better lighting or angle");
     }
     setScanning(false);
   }, [showToast]);
 
-  const confirmMachine = () => {
-    if (!preview) return;
-    const m = {
-      id: Date.now(),
-      name: preview.suggestedName || `Machine-${Date.now()}`,
-      assetTag: preview.suggestedId || `M-${Date.now()}`,
-      make: preview.make, model: preview.model,
-      serialNumber: preview.serialNumber, partNumber: preview.partNumber,
-      voltage: preview.voltage, amperage: preview.amperage,
-      horsepower: preview.horsepower, rpm: preview.rpm,
-      phase: preview.phase, hz: preview.hz,
-      weight: preview.weight, year: preview.year,
-      category: preview.category || "Machine",
-      description: preview.description,
-      pmIntervalDays: preview.pmIntervalDays,
-      additionalSpecs: preview.additionalSpecs || {},
-      photo: preview._photo,
-      addedAt: new Date().toISOString(),
-      location: "",
-    };
+  // ── CONFIRM NEW MACHINE ──
+  const confirmNew = (formData) => {
+    const m = { ...parsedToMachine(preview), ...formData, id: Date.now() };
     setMachines(p => [m, ...p]);
-    setPreview(null);
-    showToast(`✅ ${m.name} added to Machine Database`);
+    setSessionLog(s => [{ action:"created", name:m.name, ts:new Date().toISOString() }, ...s]);
+    setPreview(null); setDecision(null);
+    showToast(`✅ "${m.name}" created`);
   };
 
-  const cats = ["All", ...Array.from(new Set(machines.map(m=>m.category||"Machine")))];
+  // ── CONFIRM MERGE INTO EXISTING ──
+  const confirmMerge = (targetId) => {
+    const target = machines.find(m => m.id === targetId);
+    if (!target) return;
+    const merged = mergeIntoMachine(target, preview);
+    setMachines(p => p.map(m => m.id === targetId ? merged : m));
+    setSessionLog(s => [{ action:"updated", name:target.name, ts:new Date().toISOString() }, ...s]);
+    setPreview(null); setDecision(null); setMergeTarget(null);
+    showToast(`✅ Photo & data added to "${target.name}"`);
+  };
 
-  const displayed = filter==="All" ? machines : machines.filter(m=>(m.category||"Machine")===filter);
+  const cats     = ["All", ...Array.from(new Set(machines.map(m => m.category || "Machine")))];
+  const filtered = machines
+    .filter(m => filter === "All" || (m.category || "Machine") === filter)
+    .filter(m => !search || m.name?.toLowerCase().includes(search.toLowerCase()) || m.make?.toLowerCase().includes(search.toLowerCase()) || m.assetTag?.toLowerCase().includes(search.toLowerCase()));
 
-  const editFields = [
-    { key:"name", label:"Machine Name" },
-    { key:"assetTag", label:"Asset Tag / ID" },
-    { key:"location", label:"Location / Building" },
-    { key:"make", label:"Make / Manufacturer" },
-    { key:"model", label:"Model" },
-    { key:"serialNumber", label:"Serial Number" },
-    { key:"partNumber", label:"Part Number" },
-    { key:"voltage", label:"Voltage" },
-    { key:"amperage", label:"Amperage" },
-    { key:"horsepower", label:"Horsepower" },
-    { key:"rpm", label:"RPM" },
-    { key:"phase", label:"Phase" },
-    { key:"year", label:"Year" },
-    { key:"category", label:"Category", type:"select", options:["Machine","Equipment","Electrical","Asset","Safety"] },
-    { key:"pmIntervalDays", label:"PM Interval (days)", type:"number" },
-    { key:"description", label:"Notes / Description", type:"textarea" },
-  ];
+  // ── DECISION SCREEN: what do we do with this scan? ──
+  const DecisionScreen = () => (
+    <div style={{ background:"rgba(124,58,237,0.07)",border:"2px solid rgba(124,58,237,0.35)",borderRadius:18,padding:20,marginBottom:20 }}>
+      {/* Parsed summary */}
+      <div style={{ fontWeight:800,color:"#7c3aed",fontSize:15,marginBottom:10 }}>📸 Nameplate Scanned</div>
+      <div style={{ display:"grid",gridTemplateColumns:"repeat(2,1fr)",gap:6,marginBottom:14 }}>
+        {[["Name",preview.suggestedName],["Tag",preview.suggestedId],["Make",preview.make],["Model",preview.model],["Serial",preview.serialNumber],["Voltage",preview.voltage],["HP",preview.horsepower],["RPM",preview.rpm],["Phase",preview.phase],["Year",preview.year]].filter(([,v])=>v).map(([k,v])=>(
+          <div key={k} style={{ background:"rgba(255,255,255,0.7)",borderRadius:8,padding:"6px 10px" }}>
+            <div style={{ color:"#94a3b8",fontSize:9,fontWeight:600 }}>{k}</div>
+            <div style={{ color:"#1e1b4b",fontWeight:700,fontSize:12 }}>{v}</div>
+          </div>
+        ))}
+      </div>
+      {preview._photo && <img src={preview._photo} alt="nameplate" style={{ width:"100%",maxHeight:100,objectFit:"cover",borderRadius:10,marginBottom:14,opacity:0.85 }} />}
+
+      {/* THE DECISION */}
+      {!decision && (
+        <>
+          <div style={{ fontSize:13,color:"#64748b",fontWeight:600,marginBottom:10,textAlign:"center" }}>What do you want to do with this?</div>
+          <div style={{ display:"grid",gridTemplateColumns:"1fr 1fr",gap:10 }}>
+            <button onClick={()=>setDecision("new")} style={{ padding:"16px 10px",background:"linear-gradient(135deg,#7c3aed,#a855f7)",border:"none",borderRadius:14,color:"#fff",fontWeight:800,fontSize:13,cursor:"pointer",lineHeight:1.4 }}>
+              ➕ Create New Asset
+              <div style={{ fontSize:10,fontWeight:400,opacity:0.85,marginTop:4 }}>Add this as a brand new machine</div>
+            </button>
+            <button onClick={()=>setDecision("existing")} style={{ padding:"16px 10px",background:"rgba(56,189,248,0.12)",border:"2px solid rgba(56,189,248,0.4)",borderRadius:14,color:"#0ea5e9",fontWeight:800,fontSize:13,cursor:"pointer",lineHeight:1.4 }}>
+              🔗 Add to Existing
+              <div style={{ fontSize:10,fontWeight:400,opacity:0.85,marginTop:4 }}>Attach photo/data to a machine already in your DB</div>
+            </button>
+          </div>
+          <button onClick={()=>setPreview(null)} style={{ width:"100%",marginTop:10,padding:"9px 0",background:"transparent",border:"1px solid rgba(148,163,184,0.3)",borderRadius:10,color:"#94a3b8",cursor:"pointer",fontSize:12 }}>Discard</button>
+        </>
+      )}
+
+      {/* NEW ASSET — inline quick-confirm with name/tag/location editable */}
+      {decision === "new" && (
+        <NewAssetForm preview={preview} onConfirm={confirmNew} onBack={()=>setDecision(null)} />
+      )}
+
+      {/* ADD TO EXISTING — pick from list */}
+      {decision === "existing" && (
+        <div>
+          <div style={{ display:"flex",alignItems:"center",gap:10,marginBottom:12 }}>
+            <button onClick={()=>setDecision(null)} style={{ background:"none",border:"none",color:"#7c3aed",cursor:"pointer",fontSize:13,fontWeight:600 }}>← Back</button>
+            <span style={{ fontSize:13,color:"#64748b" }}>Pick the machine to update:</span>
+          </div>
+          <div style={{ maxHeight:260,overflowY:"auto",display:"flex",flexDirection:"column",gap:8 }}>
+            {machines.length === 0 && <div style={{ color:"#94a3b8",fontSize:13,padding:12 }}>No machines in DB yet — create a new one first.</div>}
+            {machines.map(m=>(
+              <button key={m.id} onClick={()=>confirmMerge(m.id)} style={{ display:"flex",alignItems:"center",gap:12,padding:"10px 14px",background:"rgba(255,255,255,0.7)",border:"1.5px solid rgba(124,58,237,0.15)",borderRadius:12,cursor:"pointer",textAlign:"left",width:"100%" }}>
+                {m.photos?.[0] && <img src={m.photos[0].url} alt="" style={{ width:40,height:40,objectFit:"cover",borderRadius:8,flexShrink:0 }} />}
+                <div>
+                  <div style={{ fontWeight:700,fontSize:13,color:"#1e1b4b" }}>{m.name}</div>
+                  <div style={{ fontSize:11,color:"#94a3b8" }}>{m.assetTag} · {m.make} {m.model}</div>
+                  {m.location && <div style={{ fontSize:10,color:"#94a3b8" }}>📍 {m.location}</div>}
+                </div>
+                <div style={{ marginLeft:"auto",color:"#7c3aed",fontSize:13 }}>→</div>
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
+    </div>
+  );
 
   return (
     <div>
       {editM && (
-        <EditModal item={editM} fields={editFields} title={`Edit: ${editM.name}`}
-          onSave={updated=>{ setMachines(p=>p.map(m=>m.id===updated.id?updated:m)); setEditM(null); showToast("✅ Machine updated"); }}
+        <EditModal item={editM} fields={MACHINE_EDIT_FIELDS} title={`Edit: ${editM.name}`}
+          onSave={updated=>{ setMachines(p=>p.map(m=>m.id===updated.id?{...m,...updated}:m)); setEditM(null); showToast("✅ Machine updated"); }}
           onClose={()=>setEditM(null)} />
       )}
 
-      {/* SCAN BAR */}
-      <div style={{ display:"flex",gap:10,marginBottom:20,flexWrap:"wrap" }}>
-        <PhotoCapture onCapture={handleScan} label="📸 Scan Nameplate" loading={scanning} />
-        <div style={{ fontSize:12,color:"#94a3b8",alignSelf:"center" }}>
-          Point camera at any machine nameplate → AI reads & names it
+      {/* SESSION MODE BANNER */}
+      {sessionMode && (
+        <div style={{ background:"linear-gradient(135deg,rgba(124,58,237,0.12),rgba(168,85,247,0.08))",border:"1.5px solid rgba(124,58,237,0.3)",borderRadius:14,padding:"12px 16px",marginBottom:16,display:"flex",alignItems:"center",justifyContent:"space-between",flexWrap:"wrap",gap:8 }}>
+          <div>
+            <span style={{ fontWeight:800,color:"#7c3aed",fontSize:14 }}>🏃 Scan Session Active</span>
+            <span style={{ color:"#94a3b8",fontSize:12,marginLeft:10 }}>{sessionLog.length} scanned this session</span>
+            {sessionLog.slice(0,3).map((l,i)=>(
+              <div key={i} style={{ fontSize:11,color:"#64748b",marginTop:2 }}>{l.action==="created"?"➕":"🔗"} {l.name}</div>
+            ))}
+          </div>
+          <button onClick={()=>{ setSessionMode(false); setSessionLog([]); }} style={{ padding:"7px 14px",background:"rgba(248,113,113,0.1)",border:"1px solid rgba(248,113,113,0.3)",borderRadius:10,color:"#f87171",fontSize:12,cursor:"pointer" }}>End Session</button>
+        </div>
+      )}
+
+      {/* SCAN + SESSION CONTROLS */}
+      <div style={{ display:"flex",gap:10,marginBottom:16,flexWrap:"wrap",alignItems:"center" }}>
+        <PhotoCapture onCapture={handleScan} label={scanning?"⏳ Reading...":"📸 Scan Nameplate"} loading={scanning} />
+        {!sessionMode && (
+          <button onClick={()=>setSessionMode(true)} style={{ padding:"12px 18px",background:"rgba(255,255,255,0.7)",border:"1.5px solid rgba(124,58,237,0.2)",borderRadius:12,color:"#7c3aed",fontWeight:700,fontSize:13,cursor:"pointer" }}>
+            🏃 Start Scan Session
+          </button>
+        )}
+        {sessionMode && (
+          <PhotoCapture onCapture={handleScan} label="📸 Next Plate" loading={scanning} />
+        )}
+        <div style={{ fontSize:12,color:"#94a3b8",alignSelf:"center",flex:1,minWidth:120 }}>
+          {machines.length} machine{machines.length!==1?"s":""} in database
         </div>
       </div>
 
-      {/* PREVIEW */}
-      {preview && (
-        <div style={{ background:"rgba(124,58,237,0.08)",border:"2px solid rgba(124,58,237,0.3)",borderRadius:16,padding:20,marginBottom:20 }}>
-          <div style={{ fontWeight:800,color:"#7c3aed",fontSize:15,marginBottom:12 }}>🏭 Nameplate Parsed — Review</div>
-          <div style={{ display:"grid",gridTemplateColumns:"repeat(2,1fr)",gap:8,marginBottom:14 }}>
-            {[
-              ["Suggested Name", preview.suggestedName],
-              ["Asset Tag",      preview.suggestedId],
-              ["Make",           preview.make],
-              ["Model",          preview.model],
-              ["Serial #",       preview.serialNumber],
-              ["Voltage",        preview.voltage],
-              ["HP",             preview.horsepower],
-              ["RPM",            preview.rpm],
-              ["Phase",          preview.phase],
-              ["Year",           preview.year],
-              ["PM Every",       preview.pmIntervalDays ? `${preview.pmIntervalDays}d` : null],
-              ["Category",       preview.category],
-            ].filter(([,v])=>v).map(([k,v])=>(
-              <div key={k} style={{ background:"rgba(255,255,255,0.5)",borderRadius:8,padding:"8px 12px" }}>
-                <div style={{ color:"#94a3b8",fontSize:10 }}>{k}</div>
-                <div style={{ color:"#1e1b4b",fontWeight:700,fontSize:13 }}>{v}</div>
-              </div>
+      {/* DECISION SCREEN */}
+      {preview && <DecisionScreen />}
+
+      {/* SEARCH + FILTER */}
+      {machines.length > 0 && !preview && (
+        <>
+          <input value={search} onChange={e=>setSearch(e.target.value)} placeholder="🔍 Search machines, makes, tags..."
+            style={{ ...S.inp,marginBottom:12,fontSize:13 }} />
+          <div style={{ display:"flex",gap:8,flexWrap:"wrap",marginBottom:16 }}>
+            {cats.map(c=>(
+              <button key={c} onClick={()=>setFilter(c)} style={{ padding:"6px 14px",borderRadius:20,border:`1px solid ${filter===c?"#7c3aed":"rgba(124,58,237,0.15)"}`,background:filter===c?"rgba(124,58,237,0.1)":"rgba(255,255,255,0.6)",color:filter===c?"#7c3aed":"#64748b",fontSize:12,cursor:"pointer",fontFamily:"inherit" }}>{c}</button>
             ))}
           </div>
-          {preview._photo && <img src={preview._photo} alt="nameplate" style={{ width:"100%",maxHeight:120,objectFit:"cover",borderRadius:8,marginBottom:12,opacity:0.85 }} />}
-          <div style={{ display:"flex",gap:8 }}>
-            <button onClick={confirmMachine} style={{ flex:1,background:"#10b981",border:"none",borderRadius:10,color:"#fff",padding:"11px 0",fontWeight:700,cursor:"pointer" }}>✅ Add to Database</button>
-            <button onClick={()=>{ const m={...preview,id:Date.now(),name:preview.suggestedName||"",assetTag:preview.suggestedId||"",photo:preview._photo,addedAt:new Date().toISOString(),location:""}; setEditM(m); setPreview(null); }} style={{ flex:1,background:"rgba(124,58,237,0.15)",border:"1px solid #7c3aed",borderRadius:10,color:"#7c3aed",padding:"11px 0",cursor:"pointer" }}>✏️ Edit First</button>
-            <button onClick={()=>setPreview(null)} style={{ background:"rgba(248,113,113,0.15)",border:"1px solid #f87171",borderRadius:10,color:"#f87171",padding:"11px 14px",cursor:"pointer" }}>✕</button>
-          </div>
-        </div>
-      )}
-
-      {/* FILTER */}
-      {machines.length > 0 && (
-        <div style={{ display:"flex",gap:8,flexWrap:"wrap",marginBottom:16 }}>
-          {cats.map(c=>(
-            <button key={c} onClick={()=>setFilter(c)} style={{ padding:"6px 14px",borderRadius:20,border:`1px solid ${filter===c?"#7c3aed":"rgba(124,58,237,0.15)"}`,background:filter===c?"rgba(124,58,237,0.1)":"rgba(255,255,255,0.6)",color:filter===c?"#7c3aed":"#64748b",fontSize:12,cursor:"pointer",fontFamily:"inherit" }}>{c}</button>
-          ))}
-        </div>
+        </>
       )}
 
       {/* MACHINE GRID */}
-      {displayed.length===0 ? (
+      {!preview && (filtered.length === 0 ? (
         <div style={{ textAlign:"center",padding:"60px 20px",color:"#94a3b8" }}>
-          <div style={{ fontSize:40,marginBottom:12 }}>🏭</div>
-          <div style={{ fontWeight:700,fontSize:16,marginBottom:6 }}>No machines yet</div>
-          <div style={{ fontSize:13 }}>Scan a nameplate to start building your database</div>
+          <div style={{ fontSize:48,marginBottom:12 }}>🏭</div>
+          <div style={{ fontWeight:800,fontSize:17,color:"#1e1b4b",marginBottom:6 }}>
+            {machines.length === 0 ? "Machine Database is Empty" : "No results"}
+          </div>
+          <div style={{ fontSize:13 }}>
+            {machines.length === 0 ? "Tap \"Scan Nameplate\" or \"Start Scan Session\" to build your database" : "Try a different search or filter"}
+          </div>
         </div>
       ) : (
         <div style={{ display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(280px,1fr))",gap:14 }}>
-          {displayed.map(m=>(
+          {filtered.map(m=>(
             <MachineCard key={m.id} machine={m}
               onEdit={()=>setEditM(m)}
               onDelete={()=>{ setMachines(p=>p.filter(x=>x.id!==m.id)); showToast("🗑 Machine removed"); }} />
           ))}
         </div>
-      )}
+      ))}
+    </div>
+  );
+}
+
+// ── QUICK NEW ASSET FORM (inline in decision screen) ──
+function NewAssetForm({ preview, onConfirm, onBack }) {
+  const [form, setForm] = useState({
+    name:     preview.suggestedName || "",
+    assetTag: preview.suggestedId   || "",
+    location: "",
+    category: preview.category      || "Machine",
+    pmIntervalDays: preview.pmIntervalDays || "",
+  });
+  const set = (k,v) => setForm(f=>({...f,[k]:v}));
+  return (
+    <div style={{ marginTop:14 }}>
+      <div style={{ display:"flex",alignItems:"center",gap:8,marginBottom:12 }}>
+        <button onClick={onBack} style={{ background:"none",border:"none",color:"#7c3aed",cursor:"pointer",fontSize:13,fontWeight:600 }}>← Back</button>
+        <span style={{ fontWeight:700,color:"#1e1b4b",fontSize:14 }}>New Asset Details</span>
+      </div>
+      {[
+        { k:"name",     l:"Machine Name *", ph:"e.g. CNC Mill-01" },
+        { k:"assetTag", l:"Asset Tag",      ph:"e.g. MILL-01" },
+        { k:"location", l:"Location",       ph:"e.g. Main Building Bay 3" },
+      ].map(({k,l,ph})=>(
+        <div key={k} style={{ marginBottom:10 }}>
+          <div style={{ fontSize:11,color:"#94a3b8",marginBottom:4,fontWeight:600 }}>{l}</div>
+          <input value={form[k]} onChange={e=>set(k,e.target.value)} placeholder={ph} style={S.inp} />
+        </div>
+      ))}
+      <div style={{ display:"grid",gridTemplateColumns:"1fr 1fr",gap:10,marginBottom:10 }}>
+        <div>
+          <div style={{ fontSize:11,color:"#94a3b8",marginBottom:4,fontWeight:600 }}>Category</div>
+          <select value={form.category} onChange={e=>set("category",e.target.value)} style={S.inp}>
+            {["Machine","Equipment","Electrical","Asset","Safety","Filter"].map(c=><option key={c}>{c}</option>)}
+          </select>
+        </div>
+        <div>
+          <div style={{ fontSize:11,color:"#94a3b8",marginBottom:4,fontWeight:600 }}>PM Interval (days)</div>
+          <input type="number" value={form.pmIntervalDays} onChange={e=>set("pmIntervalDays",e.target.value)} placeholder="e.g. 90" style={S.inp} />
+        </div>
+      </div>
+      <div style={{ display:"flex",gap:8,marginTop:4 }}>
+        <button onClick={()=>onConfirm(form)} disabled={!form.name.trim()} style={{ flex:1,padding:"12px 0",background:"linear-gradient(135deg,#7c3aed,#a855f7)",border:"none",borderRadius:12,color:"#fff",fontWeight:800,fontSize:14,cursor:form.name.trim()?"pointer":"not-allowed",opacity:form.name.trim()?1:0.5 }}>
+          ✅ Create Asset
+        </button>
+      </div>
     </div>
   );
 }
 
 function MachineCard({ machine: m, onEdit, onDelete }) {
   const [expanded, setExpanded] = useState(false);
+  const photos = m.photos || (m.photo ? [{ url: m.photo, label: "Nameplate" }] : []);
   return (
     <div style={{ background:"rgba(255,255,255,0.65)",border:"1.5px solid rgba(168,85,247,0.2)",borderRadius:20,padding:18,backdropFilter:"blur(24px)",WebkitBackdropFilter:"blur(24px)",boxShadow:"0 4px 24px rgba(168,85,247,0.08), inset 0 1px 0 rgba(255,255,255,0.9)" }}>
-      {m.photo && <img src={m.photo} alt="nameplate" style={{ width:"100%",height:90,objectFit:"cover",borderRadius:10,marginBottom:12,opacity:0.85 }} />}
+      {/* Photo strip */}
+      {photos.length > 0 && (
+        <div style={{ display:"flex",gap:6,marginBottom:12,overflowX:"auto" }}>
+          {photos.map((p,i)=>(
+            <div key={i} style={{ position:"relative",flexShrink:0 }}>
+              <img src={p.url} alt={p.label||"nameplate"} style={{ width:photos.length===1?"100%":72,height:72,objectFit:"cover",borderRadius:8,opacity:0.88 }} />
+              {photos.length > 1 && <div style={{ position:"absolute",bottom:2,left:2,background:"rgba(0,0,0,0.55)",color:"#fff",fontSize:8,padding:"1px 4px",borderRadius:4 }}>{p.label||`Photo ${i+1}`}</div>}
+            </div>
+          ))}
+        </div>
+      )}
+
       <div style={{ display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:6 }}>
         <div>
           <div style={{ fontWeight:800,fontSize:15,color:"#1e1b4b" }}>{m.name}</div>
@@ -365,27 +533,31 @@ function MachineCard({ machine: m, onEdit, onDelete }) {
         <Badge label={m.category||"Machine"} color={CAT_COLOR[m.category]||"#a855f7"} />
       </div>
       {m.location && <div style={{ fontSize:11,color:"#94a3b8",marginBottom:4 }}>📍 {m.location}</div>}
-      <div style={{ fontSize:12,color:"#64748b",marginBottom:8 }}>{m.make} {m.model}</div>
+      <div style={{ fontSize:12,color:"#64748b",marginBottom:8 }}>{[m.make,m.model].filter(Boolean).join(" ") || "—"}</div>
 
       {expanded && (
         <div style={{ display:"grid",gridTemplateColumns:"repeat(2,1fr)",gap:6,marginBottom:10 }}>
           {[
-            ["Serial #", m.serialNumber],["Voltage", m.voltage],
-            ["HP", m.horsepower],["RPM", m.rpm],
-            ["Phase", m.phase],["Year", m.year],
-            ["Amperage", m.amperage],["PM Every", m.pmIntervalDays?`${m.pmIntervalDays}d`:null],
+            ["Serial #",  m.serialNumber],["Part #",   m.partNumber],
+            ["Voltage",   m.voltage],     ["Amperage", m.amperage],
+            ["HP",        m.horsepower],  ["RPM",      m.rpm],
+            ["Phase",     m.phase],       ["Hz",       m.hz],
+            ["Year",      m.year],        ["Weight",   m.weight],
+            ["PM Every",  m.pmIntervalDays?`${m.pmIntervalDays}d`:null],
+            ["Photos",    photos.length>0?`${photos.length} on file`:null],
           ].filter(([,v])=>v).map(([k,v])=>(
             <div key={k} style={{ background:"rgba(124,58,237,0.04)",borderRadius:8,padding:"6px 10px" }}>
               <div style={{ color:"#94a3b8",fontSize:9 }}>{k}</div>
               <div style={{ color:"#1e1b4b",fontWeight:600,fontSize:12 }}>{v}</div>
             </div>
           ))}
+          {m.description && <div style={{ gridColumn:"1/-1",background:"rgba(124,58,237,0.04)",borderRadius:8,padding:"8px 10px" }}><div style={{ color:"#94a3b8",fontSize:9,marginBottom:2 }}>Notes</div><div style={{ color:"#1e1b4b",fontSize:12 }}>{m.description}</div></div>}
         </div>
       )}
 
       <div style={{ display:"flex",gap:6,marginTop:8 }}>
-        <button onClick={()=>setExpanded(e=>!e)} style={S.cGhost}>{expanded?"Less":"Details"}</button>
-        <button onClick={onEdit} style={{ ...S.cGhost,color:"#7c3aed" }}>Edit</button>
+        <button onClick={()=>setExpanded(e=>!e)} style={S.cGhost}>{expanded?"▲ Less":"▼ Details"}</button>
+        <button onClick={onEdit} style={{ ...S.cGhost,color:"#7c3aed" }}>✏️ Edit</button>
         <button onClick={onDelete} style={{ ...S.cGhost,color:"#f87171",borderColor:"#f8717130" }}>✕</button>
       </div>
     </div>
