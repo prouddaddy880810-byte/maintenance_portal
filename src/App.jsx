@@ -710,6 +710,7 @@ export default function App() {
   const [logs,       setLogs]       = useState(() => load("cbv3_logs",       INITIAL_LOGS));
   const [machines,   setMachines]   = useState(() => load("cbv3_machines",   INITIAL_MACHINES));
   const [gaugeLogs,  setGaugeLogs]  = useState(() => load("cbv3_gaugeLogs",  INITIAL_GAUGE_LOGS));
+  const [workEntries, setWorkEntries] = useState(() => load("cbv3_workEntries", []));
   const [tab,        setTab]        = useState("dashboard");
   const [catFilter,  setCat]        = useState("All");
   const [logModal,   setLog]        = useState(null);
@@ -725,6 +726,7 @@ export default function App() {
   useEffect(() => { save("cbv3_logs",      logs);      }, [logs]);
   useEffect(() => { save("cbv3_machines",  machines);  }, [machines]);
   useEffect(() => { save("cbv3_gaugeLogs", gaugeLogs); }, [gaugeLogs]);
+  useEffect(() => { save("cbv3_workEntries", workEntries); }, [workEntries]);
 
   function showToast(m) { setToast(m); setTimeout(()=>setToast(null), 2800); }
 
@@ -766,6 +768,7 @@ export default function App() {
     ["machines",   "🏭 Machines"],
     ["gauge",      "⚡ Gauge Log"],
     ["history",    "PM History"],
+    ["worklog",    "📋 Daily Log"],
     ["add",        "+ Add Asset"],
   ];
 
@@ -912,6 +915,11 @@ export default function App() {
           <GaugeLog gaugeLogs={gaugeLogs} setGaugeLogs={setGaugeLogs} assets={assets} showToast={showToast} />
         )}
 
+        {/* DAILY WORK LOG */}
+        {tab==="worklog" && (
+          <DailyWorkLog workEntries={workEntries} setWorkEntries={setWorkEntries} showToast={showToast} />
+        )}
+
         {/* PM HISTORY */}
         {tab==="history" && (
           <div style={S.glassPanel}>
@@ -984,3 +992,211 @@ const S = {
   btnG: { flex:1, padding:"11px 16px", background:"rgba(255,255,255,0.5)", border:"1px solid rgba(124,58,237,0.15)", color:"#94a3b8", cursor:"pointer", fontFamily:"inherit", fontSize:13, borderRadius:14 },
   toast: { position:"fixed", bottom:28, left:"50%", transform:"translateX(-50%)", background:"rgba(255,255,255,0.92)", border:"1px solid rgba(124,58,237,0.2)", backdropFilter:"blur(20px)", color:"#7c3aed", fontWeight:700, padding:"12px 28px", borderRadius:20, fontSize:13, zIndex:999, whiteSpace:"nowrap", boxShadow:"0 8px 32px rgba(124,58,237,0.2)" },
 };
+
+// ─── DAILY WORK LOG ──────────────────────────────────────────────────────────
+const WORK_TAGS = [
+  { label:"🔧 Repair",      color:"#f87171" },
+  { label:"🔩 PM",          color:"#7c3aed" },
+  { label:"📸 Inspection",  color:"#38bdf8" },
+  { label:"🏭 Machine",     color:"#a855f7" },
+  { label:"⚡ Electrical",  color:"#f59e0b" },
+  { label:"🧹 Housekeeping",color:"#10b981" },
+  { label:"📦 Parts",       color:"#64748b" },
+  { label:"🚨 Emergency",   color:"#ef4444" },
+  { label:"💬 Comms",       color:"#06b6d4" },
+  { label:"Other",          color:"#94a3b8" },
+];
+
+function DailyWorkLog({ workEntries, setWorkEntries, showToast }) {
+  const [text,     setText]     = useState("");
+  const [tag,      setTag]      = useState("🔧 Repair");
+  const [filterDay,setFilterDay]= useState(TODAY);
+  const [editEntry,setEditEntry]= useState(null);
+  const [editText, setEditText] = useState("");
+  const textRef = useRef();
+
+  const todayEntries = workEntries
+    .filter(e => e.date === filterDay)
+    .sort((a,b) => b.timestamp - a.timestamp);
+
+  const allDays = [...new Set(workEntries.map(e=>e.date))].sort((a,b)=>b.localeCompare(a));
+
+  function submit() {
+    if (!text.trim()) return;
+    const entry = {
+      id: Date.now(),
+      timestamp: Date.now(),
+      date: TODAY,
+      time: new Date().toLocaleTimeString("en-US",{hour:"numeric",minute:"2-digit"}),
+      text: text.trim(),
+      tag,
+      tech: "CB",
+    };
+    setWorkEntries(p => [entry, ...p]);
+    setText("");
+    showToast("✅ Logged");
+    textRef.current?.focus();
+  }
+
+  function deleteEntry(id) {
+    setWorkEntries(p => p.filter(e => e.id !== id));
+    showToast("🗑 Entry removed");
+  }
+
+  function saveEdit() {
+    setWorkEntries(p => p.map(e => e.id===editEntry.id ? {...e, text:editText} : e));
+    setEditEntry(null);
+    showToast("✅ Updated");
+  }
+
+  const tagColor = (t) => WORK_TAGS.find(x=>x.label===t)?.color || "#94a3b8";
+
+  return (
+    <div>
+      {/* EDIT MODAL */}
+      {editEntry && (
+        <Overlay onClose={()=>setEditEntry(null)}>
+          <div style={S.mTitle}>Edit Entry</div>
+          <div style={{ marginTop:12,fontSize:11,color:"#94a3b8",marginBottom:6 }}>
+            {editEntry.time} · {editEntry.date}
+          </div>
+          <textarea
+            value={editText}
+            onChange={e=>setEditText(e.target.value)}
+            rows={5}
+            autoFocus
+            style={{...S.inp, resize:"vertical", marginTop:8}}
+          />
+          <div style={S.mRow}>
+            <button onClick={()=>setEditEntry(null)} style={S.btnG}>Cancel</button>
+            <button onClick={saveEdit} style={S.btnP}>Save</button>
+          </div>
+        </Overlay>
+      )}
+
+      {/* QUICK ENTRY BOX */}
+      <div style={{ background:"rgba(255,255,255,0.75)", border:"1.5px solid rgba(124,58,237,0.15)", borderRadius:20, padding:18, marginBottom:20, backdropFilter:"blur(20px)", boxShadow:"0 4px 24px rgba(124,58,237,0.06)" }}>
+        <div style={{ fontSize:11,color:"#94a3b8",fontWeight:700,letterSpacing:1,textTransform:"uppercase",marginBottom:10 }}>
+          📋 What did you just do?
+        </div>
+
+        {/* TAG ROW */}
+        <div style={{ display:"flex",gap:6,flexWrap:"wrap",marginBottom:12 }}>
+          {WORK_TAGS.map(t=>(
+            <button key={t.label} onClick={()=>setTag(t.label)} style={{
+              padding:"5px 11px", borderRadius:20, fontSize:11, fontWeight:600,
+              cursor:"pointer", fontFamily:"inherit",
+              background: tag===t.label ? t.color+"22" : "rgba(255,255,255,0.5)",
+              border: `1.5px solid ${tag===t.label ? t.color : "rgba(124,58,237,0.12)"}`,
+              color: tag===t.label ? t.color : "#94a3b8",
+            }}>{t.label}</button>
+          ))}
+        </div>
+
+        {/* TEXT INPUT */}
+        <textarea
+          ref={textRef}
+          value={text}
+          onChange={e=>setText(e.target.value)}
+          onKeyDown={e=>{ if(e.key==="Enter"&&(e.metaKey||e.ctrlKey)) submit(); }}
+          placeholder="e.g. Replaced HVAC filter in break room, 20x20x1 MERV-8. Found duct tape on return — removed it."
+          rows={3}
+          style={{...S.inp, resize:"none", fontSize:14, marginBottom:12}}
+        />
+
+        <div style={{ display:"flex",justifyContent:"space-between",alignItems:"center",flexWrap:"wrap",gap:10 }}>
+          <div style={{ fontSize:11,color:"#94a3b8" }}>
+            {new Date().toLocaleTimeString("en-US",{hour:"numeric",minute:"2-digit"})} · {TODAY} · CB
+            <span style={{ marginLeft:8,color:"#cbd5e1" }}>Cmd+Enter to save</span>
+          </div>
+          <button
+            onClick={submit}
+            disabled={!text.trim()}
+            style={{ padding:"10px 28px", background:"linear-gradient(135deg,#7c3aed,#a855f7)", border:"none", borderRadius:12, color:"#fff", fontWeight:800, fontSize:14, cursor:text.trim()?"pointer":"not-allowed", opacity:text.trim()?1:0.5 }}
+          >
+            Log It →
+          </button>
+        </div>
+      </div>
+
+      {/* DAY FILTER */}
+      <div style={{ display:"flex",gap:8,marginBottom:16,overflowX:"auto",paddingBottom:4 }}>
+        {allDays.length === 0
+          ? <div style={{ fontSize:12,color:"#94a3b8" }}>No entries yet — log your first task above</div>
+          : allDays.map(d=>(
+            <button key={d} onClick={()=>setFilterDay(d)} style={{
+              padding:"6px 14px", borderRadius:20, fontSize:12, fontWeight:600,
+              cursor:"pointer", fontFamily:"inherit", whiteSpace:"nowrap",
+              background: filterDay===d ? "rgba(124,58,237,0.1)" : "rgba(255,255,255,0.6)",
+              border: `1px solid ${filterDay===d ? "#7c3aed" : "rgba(124,58,237,0.15)"}`,
+              color: filterDay===d ? "#7c3aed" : "#64748b",
+            }}>
+              {d===TODAY ? "Today" : d}
+              <span style={{ marginLeft:6,fontSize:10,opacity:0.7 }}>
+                ({workEntries.filter(e=>e.date===d).length})
+              </span>
+            </button>
+          ))
+        }
+      </div>
+
+      {/* ENTRY LIST */}
+      {todayEntries.length === 0 && allDays.length > 0 && (
+        <div style={{ textAlign:"center",padding:"30px 0",color:"#94a3b8",fontSize:13 }}>No entries for {filterDay===TODAY?"today":filterDay}</div>
+      )}
+
+      <div style={{ display:"flex",flexDirection:"column",gap:10 }}>
+        {todayEntries.map((entry,i)=>(
+          <div key={entry.id} style={{
+            background:"rgba(255,255,255,0.7)",
+            border:"1.5px solid rgba(124,58,237,0.1)",
+            borderLeft:`4px solid ${tagColor(entry.tag)}`,
+            borderRadius:14, padding:"14px 16px",
+            backdropFilter:"blur(16px)",
+            display:"flex", gap:12, alignItems:"flex-start",
+          }}>
+            {/* Timeline dot */}
+            <div style={{ display:"flex",flexDirection:"column",alignItems:"center",gap:4,paddingTop:2,flexShrink:0 }}>
+              <div style={{ width:10,height:10,borderRadius:"50%",background:tagColor(entry.tag),flexShrink:0 }} />
+              {i < todayEntries.length-1 && <div style={{ width:2,height:"100%",minHeight:20,background:"rgba(124,58,237,0.1)",borderRadius:2 }} />}
+            </div>
+
+            <div style={{ flex:1,minWidth:0 }}>
+              <div style={{ display:"flex",justifyContent:"space-between",alignItems:"flex-start",gap:8,marginBottom:6 }}>
+                <div style={{ display:"flex",gap:6,alignItems:"center",flexWrap:"wrap" }}>
+                  <span style={{ fontSize:11,fontWeight:700,color:tagColor(entry.tag),background:tagColor(entry.tag)+"18",padding:"2px 8px",borderRadius:20 }}>{entry.tag}</span>
+                  <span style={{ fontSize:11,color:"#94a3b8" }}>{entry.time}</span>
+                </div>
+                <div style={{ display:"flex",gap:6,flexShrink:0 }}>
+                  <button onClick={()=>{ setEditEntry(entry); setEditText(entry.text); }} style={{ padding:"3px 8px",background:"rgba(124,58,237,0.08)",border:"1px solid rgba(124,58,237,0.2)",borderRadius:6,color:"#7c3aed",fontSize:11,cursor:"pointer" }}>✏️</button>
+                  <button onClick={()=>deleteEntry(entry.id)} style={{ padding:"3px 8px",background:"rgba(248,113,113,0.08)",border:"1px solid rgba(248,113,113,0.2)",borderRadius:6,color:"#f87171",fontSize:11,cursor:"pointer" }}>🗑</button>
+                </div>
+              </div>
+              <div style={{ fontSize:14,color:"#1e1b4b",lineHeight:1.5,wordBreak:"break-word" }}>{entry.text}</div>
+            </div>
+          </div>
+        ))}
+      </div>
+
+      {/* DAILY SUMMARY */}
+      {todayEntries.length > 0 && (
+        <div style={{ marginTop:20,background:"rgba(124,58,237,0.05)",border:"1px solid rgba(124,58,237,0.12)",borderRadius:14,padding:"14px 16px" }}>
+          <div style={{ fontSize:11,color:"#94a3b8",fontWeight:700,letterSpacing:1,textTransform:"uppercase",marginBottom:10 }}>
+            {filterDay===TODAY?"Today's":"Day"} Summary — {todayEntries.length} task{todayEntries.length!==1?"s":""}
+          </div>
+          <div style={{ display:"flex",gap:8,flexWrap:"wrap" }}>
+            {WORK_TAGS.filter(t=>todayEntries.some(e=>e.tag===t.label)).map(t=>{
+              const count = todayEntries.filter(e=>e.tag===t.label).length;
+              return (
+                <div key={t.label} style={{ background:t.color+"15",border:`1px solid ${t.color}30`,borderRadius:20,padding:"4px 12px",display:"flex",gap:6,alignItems:"center" }}>
+                  <span style={{ color:t.color,fontWeight:800,fontSize:13 }}>{count}</span>
+                  <span style={{ color:t.color,fontSize:11 }}>{t.label}</span>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
