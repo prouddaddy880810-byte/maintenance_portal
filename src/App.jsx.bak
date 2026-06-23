@@ -70,12 +70,7 @@ function getPM(asset, logs) {
 async function aiParseImage(base64, prompt) {
   const resp = await fetch("https://api.anthropic.com/v1/messages", {
     method:"POST",
-    headers:{
-      "Content-Type":"application/json",
-      "x-api-key": import.meta.env.VITE_ANTHROPIC_API_KEY || "",
-      "anthropic-version": "2023-06-01",
-      "anthropic-dangerous-direct-browser-access": "true"
-    },
+    headers:{"Content-Type":"application/json"},
     body: JSON.stringify({
       model:"claude-sonnet-4-6", max_tokens:1000,
       messages:[{ role:"user", content:[
@@ -101,95 +96,6 @@ const NAMEPLATE_PROMPT = `Parse this machine/equipment nameplate and return ONLY
 - category: one of Filter/Equipment/Electrical/Asset/Safety/Machine
 - pmIntervalDays: suggested PM interval based on equipment type (null if unknown)
 Fill everything visible. Use null for missing fields.`;
-
-
-// ─── DEFAULT PM TASKS PER CATEGORY ──────────────────────────────────────────
-const DEFAULT_PM_TASKS = {
-  Filter:     ["Replace/rinse filter", "Check housing seal", "Log filter brand & size"],
-  Equipment:  ["Inspect belts & tensioners", "Check fluid levels", "Lubricate fittings", "Test operation", "Log any abnormalities"],
-  Electrical: ["Visual inspection – no signs of heat/burn", "Check breaker tightness", "Test GFCI if present", "Confirm labeling is accurate"],
-  Machine:    ["Check oil/coolant level", "Inspect guards & safety devices", "Clean debris from machine", "Lubricate per spec", "Run test cycle"],
-  Asset:      ["Visual condition check", "Test operation", "Note any wear or damage"],
-  Safety:     ["Verify accessibility (not blocked)", "Check expiry dates", "Log inspection per code"],
-};
-
-// ─── ASSET PM TASKS MODAL ────────────────────────────────────────────────────
-function PMTaskModal({ asset, onClose, onLogPM }) {
-  const [checked, setChecked] = useState({});
-  const [note, setNote]       = useState("");
-  const [photo, setPhoto]     = useState(null);
-  const [photoUrl, setPhotoUrl] = useState(null);
-  const tasks = asset.pmTasks || DEFAULT_PM_TASKS[asset.category] || DEFAULT_PM_TASKS["Asset"];
-
-  const toggle = (i) => setChecked(p => ({ ...p, [i]: !p[i] }));
-  const allDone = tasks.every((_, i) => checked[i]);
-
-  const handlePhoto = (base64, dataUrl) => { setPhoto(base64); setPhotoUrl(dataUrl); };
-
-  return (
-    <Overlay onClose={onClose}>
-      <div style={{ fontWeight:800, fontSize:16, color:"#7c3aed", marginBottom:4 }}>🔩 PM Checklist</div>
-      <div style={{ fontWeight:700, fontSize:14, color:"#1e1b4b", marginBottom:2 }}>{asset.name}</div>
-      <div style={{ fontSize:11, color:"#94a3b8", marginBottom:16 }}>{asset.location} · {asset.category}</div>
-
-      <div style={{ display:"flex", flexDirection:"column", gap:10, marginBottom:18 }}>
-        {tasks.map((task, i) => (
-          <div key={i} onClick={() => toggle(i)}
-            style={{ display:"flex", alignItems:"flex-start", gap:12, padding:"12px 14px",
-              background: checked[i] ? "rgba(16,185,129,0.1)" : "rgba(255,255,255,0.7)",
-              border: `1.5px solid ${checked[i] ? "#10b981" : "rgba(124,58,237,0.15)"}`,
-              borderRadius:12, cursor:"pointer", transition:"all 0.15s" }}>
-            <div style={{ width:22, height:22, borderRadius:6, border:`2px solid ${checked[i]?"#10b981":"#cbd5e1"}`,
-              background: checked[i] ? "#10b981" : "transparent", display:"flex", alignItems:"center",
-              justifyContent:"center", flexShrink:0, marginTop:1 }}>
-              {checked[i] && <span style={{ color:"#fff", fontSize:13, fontWeight:900 }}>✓</span>}
-            </div>
-            <span style={{ fontSize:13, color: checked[i] ? "#065f46" : "#334155", fontWeight: checked[i] ? 600 : 400, lineHeight:1.4 }}>{task}</span>
-          </div>
-        ))}
-      </div>
-
-      <div style={{ fontSize:11, color:"#94a3b8", fontWeight:600, marginBottom:6 }}>NOTES (optional)</div>
-      <textarea value={note} onChange={e => setNote(e.target.value)}
-        placeholder="Parts used, condition notes, anything unusual..."
-        style={{ width:"100%", padding:"10px 12px", borderRadius:10, border:"1.5px solid rgba(124,58,237,0.2)",
-          background:"rgba(255,255,255,0.8)", fontSize:13, resize:"none", height:72,
-          fontFamily:"inherit", color:"#334155", boxSizing:"border-box" }} />
-
-      <div style={{ marginTop:12, marginBottom:4, fontSize:11, color:"#94a3b8", fontWeight:600 }}>PHOTO (optional)</div>
-      {photoUrl
-        ? <div style={{ position:"relative", marginBottom:12 }}>
-            <img src={photoUrl} alt="pm" style={{ width:"100%", maxHeight:110, objectFit:"cover", borderRadius:10, opacity:0.88 }} />
-            <button onClick={() => { setPhoto(null); setPhotoUrl(null); }}
-              style={{ position:"absolute", top:6, right:6, background:"rgba(0,0,0,0.55)", border:"none", borderRadius:20,
-                color:"#fff", fontSize:11, padding:"3px 8px", cursor:"pointer" }}>✕</button>
-          </div>
-        : <PhotoCapture onCapture={handlePhoto} label="📸 Add Photo" />
-      }
-
-      {!allDone && (
-        <div style={{ marginTop:14, padding:"8px 12px", background:"rgba(245,158,11,0.1)",
-          border:"1px solid rgba(245,158,11,0.3)", borderRadius:8, fontSize:12, color:"#92400e", textAlign:"center" }}>
-          {tasks.filter((_, i) => !checked[i]).length} task(s) remaining
-        </div>
-      )}
-
-      <div style={{ display:"flex", gap:10, marginTop:16 }}>
-        <button onClick={onClose}
-          style={{ flex:1, padding:"12px 0", borderRadius:12, border:"1.5px solid rgba(148,163,184,0.3)",
-            background:"rgba(255,255,255,0.7)", color:"#64748b", fontWeight:600, fontSize:13, cursor:"pointer" }}>
-          Cancel
-        </button>
-        <button onClick={() => onLogPM({ note, photo, photoUrl, checkedCount: Object.values(checked).filter(Boolean).length, totalTasks: tasks.length })}
-          style={{ flex:2, padding:"12px 0", borderRadius:12, border:"none",
-            background: allDone ? "linear-gradient(135deg,#10b981,#059669)" : "linear-gradient(135deg,#7c3aed,#a855f7)",
-            color:"#fff", fontWeight:700, fontSize:13, cursor:"pointer" }}>
-          {allDone ? "✅ Log PM Complete" : "⚡ Log Partial PM"}
-        </button>
-      </div>
-    </Overlay>
-  );
-}
 
 // ─── SHARED COMPONENTS ───────────────────────────────────────────────────────
 function Overlay({ children, onClose }) {
@@ -335,12 +241,7 @@ function AssetCard({ asset, onLog, onHistory, onEdit, onDismiss, onDelete, dismi
             : <button onClick={onDismiss} style={{ ...S.cGhost,color:"#f59e0b",borderColor:"rgba(245,158,11,0.3)" }}>Hide</button>
           }
           <button onClick={()=>setConfirmingDelete(true)} style={{ ...S.cGhost,color:"#f87171",borderColor:"#f8717130" }}>🗑 Delete</button>
-          {!dismissed && (
-    <div style={{ display:"flex", gap:8, flexWrap:"wrap" }}>
-      <button onClick={onPMTask} style={{ ...S.cPrimary, fontSize:11, padding:"8px 12px" }}>🔩 PM Tasks</button>
-      <button onClick={onLog} style={{ ...S.cPrimary, background:"rgba(124,58,237,0.08)", color:"#7c3aed", border:"1.5px solid rgba(124,58,237,0.25)", fontSize:11, padding:"8px 12px" }}>📋 Quick Log</button>
-    </div>
-  )}
+          {!dismissed && <button onClick={onLog} style={S.cPrimary}>Log PM</button>}
         </div>
       </div>
     </>
@@ -855,7 +756,6 @@ export default function App() {
   const [tab,        setTab]        = useState("dashboard");
   const [catFilter,  setCat]        = useState("All");
   const [logModal,   setLog]        = useState(null);
-  const [pmTaskModal, setPMTask]    = useState(null);
   const [histModal,  setHist]       = useState(null);
   const [addModal,   setAdd]        = useState(false);
   const [editAsset,  setEditAsset]  = useState(null);
@@ -930,27 +830,6 @@ export default function App() {
         <EditModal item={editAsset} fields={assetEditFields} title={`Edit: ${editAsset.name}`}
           onSave={updated=>{ setAssets(p=>p.map(a=>a.id===updated.id?{...updated,intervalDays:updated.pmEnabled?parseInt(updated.intervalDays)||30:null}:a)); setEditAsset(null); showToast("✅ Asset updated"); }}
           onClose={()=>setEditAsset(null)} />
-      )}
-
-      {/* PM TASK MODAL */}
-      {pmTaskModal && (
-        <PMTaskModal
-          asset={pmTaskModal}
-          onClose={() => setPMTask(null)}
-          onLogPM={({ note, photo, photoUrl, checkedCount, totalTasks }) => {
-            const newLog = {
-              id: Date.now(),
-              assetId: pmTaskModal.id,
-              date: TODAY,
-              note: note || `PM checklist: ${checkedCount}/${totalTasks} tasks completed`,
-              tech: "CB",
-              photo: photoUrl || null,
-            };
-            setLogs(p => [newLog, ...p]);
-            showToast(`✅ PM logged for ${pmTaskModal.name}`);
-            setPMTask(null);
-          }}
-        />
       )}
 
       {/* LOG MODAL */}
@@ -1072,7 +951,6 @@ export default function App() {
                 <AssetCard key={a.id} asset={a}
                   dismissed={!!a.dismissed}
                   onLog={()=>setLog(a)}
-                  onPMTask={()=>setPMTask(a)}
                   onHistory={()=>setHist(a)}
                   onEdit={()=>setEditAsset(a)}
                   onDismiss={()=>dismissAsset(a.id)}
