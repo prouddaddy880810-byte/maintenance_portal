@@ -26,6 +26,7 @@ const INITIAL_ASSETS = [
 ];
 
 const INITIAL_LOGS = [
+  { id:7, assetId:11, date:TODAY, note:"🔴 FAULT E403 — Compressor Discharge Temp. WARNING A602 also active. Run hrs: 40,056. Service due in 7hrs. CFM=0 at time of fault. Check: oil level, oil separator element, cooling fan, air/oil cooler. Do NOT restart without inspection.", tech:"CB" },
   { id:1, assetId:1,  date:TODAY, note:"20×25×2 replaced", tech:"CB" },
   { id:2, assetId:2,  date:TODAY, note:"16×20×1 replaced", tech:"CB" },
   { id:3, assetId:3,  date:TODAY, note:"20×20×1 replaced", tech:"CB" },
@@ -37,6 +38,18 @@ const INITIAL_LOGS = [
 const INITIAL_MACHINES = [];
 
 const INITIAL_GAUGE_LOGS = [
+  {
+    id:3, assetId:11, timestamp:"2026-06-24T07:16:00",
+    pressure:108, temp:null, runHours:40056, loadHours:35202,
+    maintenanceIn:7, status:"FAULT — E403 Compressor Discharge Temp", keyMode:"Remote Start Enabled | Auto Restart Enabled",
+    notes:"🔴 FAULT E403: Compressor Discharge Temp. ⚠️ WARNING A602: Compressor Discharge Temp. CFM=0. Service due in 7 hours. Immediate inspection required — check oil level, oil separator element, cooling fan, and air/oil cooler for blockage.", photo:null, source:"manual"
+  },
+  {
+    id:2, assetId:11, timestamp:"2026-06-24T07:16:00",
+    pressure:111, temp:171, runHours:38135, loadHours:21616,
+    maintenanceIn:957, status:"On Load", keyMode:"On | pA - Load",
+    notes:"Routine morning reading. All values normal.", photo:null, source:"manual"
+  },
   {
     id:1, assetId:11, timestamp:"2026-06-22T07:03:00",
     pressure:110, temp:163, runHours:38087, loadHours:21598,
