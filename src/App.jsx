@@ -858,6 +858,161 @@ function GaugeLog({ gaugeLogs, setGaugeLogs, assets, showToast }) {
   );
 }
 
+// ─── REPAIR MODAL ────────────────────────────────────────────────────────────
+function RepairModal({ assets, setAssets, setLogs, showToast, onClose }) {
+  const [search,      setSearch]      = useState("");
+  const [selected,    setSelected]    = useState(null);  // existing asset
+  const [newMode,     setNewMode]     = useState(false); // creating new asset
+  const [note,        setNote]        = useState("");
+  const [date,        setDate]        = useState(TODAY);
+  const [newAsset,    setNewAsset]    = useState({ name:"", location:"", category:"Equipment", detail:"", intervalDays:90, pmEnabled:true });
+
+  const filtered = search.trim().length > 1
+    ? assets.filter(a => a.name.toLowerCase().includes(search.toLowerCase()) || a.location.toLowerCase().includes(search.toLowerCase()))
+    : [];
+
+  function handleSelectAsset(a) {
+    setSelected(a);
+    setSearch(a.name);
+    setNewMode(false);
+  }
+
+  function handleNewMode() {
+    setNewMode(true);
+    setSelected(null);
+    setNewAsset(p => ({ ...p, name: search.trim() }));
+  }
+
+  function save() {
+    if (!note.trim()) return;
+    let assetId;
+    if (newMode) {
+      if (!newAsset.name.trim()) return;
+      const freshAsset = { ...newAsset, id: Date.now(), intervalDays: newAsset.pmEnabled ? parseInt(newAsset.intervalDays)||90 : null };
+      setAssets(p => [...p, freshAsset]);
+      assetId = freshAsset.id;
+      showToast(`✅ Asset added & repair logged: ${freshAsset.name}`);
+    } else if (selected) {
+      assetId = selected.id;
+      showToast(`✅ Repair logged: ${selected.name}`);
+    } else {
+      return;
+    }
+    setLogs(p => [{ id: Date.now()+1, assetId, date, note: "🔧 " + note.trim(), tech:"CB" }, ...p]);
+    onClose();
+  }
+
+  const canSave = note.trim() && (selected || (newMode && newAsset.name.trim()));
+
+  return (
+    <Overlay onClose={onClose}>
+      <div style={{ ...S.mLabel, color:"#f87171" }}>🔧 Log a Repair</div>
+      <div style={S.mTitle}>What did you fix?</div>
+
+      {/* SEARCH */}
+      {!selected && !newMode && (
+        <>
+          <Lbl>Search asset or type a new one</Lbl>
+          <input
+            autoFocus
+            value={search}
+            onChange={e=>{ setSearch(e.target.value); setSelected(null); }}
+            placeholder="e.g. Forklift, Tube Laser, Panel..."
+            style={S.inp}
+          />
+          {/* RESULTS */}
+          {filtered.length > 0 && (
+            <div style={{ marginTop:8, display:"flex", flexDirection:"column", gap:6 }}>
+              {filtered.map(a => (
+                <button key={a.id} onClick={()=>handleSelectAsset(a)} style={{
+                  textAlign:"left", padding:"10px 14px", borderRadius:12,
+                  border:"1.5px solid rgba(124,58,237,0.2)", background:"rgba(124,58,237,0.05)",
+                  cursor:"pointer", fontFamily:"inherit"
+                }}>
+                  <span style={{ fontWeight:700, fontSize:13, color:"#1e1b4b" }}>{a.name}</span>
+                  <span style={{ fontSize:11, color:"#94a3b8", marginLeft:8 }}>{a.location}</span>
+                </button>
+              ))}
+            </div>
+          )}
+          {/* NEW ASSET PROMPT */}
+          {search.trim().length > 1 && (
+            <button onClick={handleNewMode} style={{
+              marginTop:10, width:"100%", padding:"10px 14px", borderRadius:12,
+              border:"1.5px dashed rgba(124,58,237,0.35)", background:"rgba(124,58,237,0.04)",
+              color:"#7c3aed", cursor:"pointer", fontFamily:"inherit", fontWeight:700, fontSize:13
+            }}>
+              + Add "{search.trim()}" as a new asset
+            </button>
+          )}
+        </>
+      )}
+
+      {/* SELECTED EXISTING ASSET */}
+      {selected && !newMode && (
+        <div style={{ background:"rgba(124,58,237,0.06)", border:"1.5px solid rgba(124,58,237,0.2)", borderRadius:12, padding:"10px 14px", marginBottom:4, display:"flex", alignItems:"center", justifyContent:"space-between" }}>
+          <div>
+            <div style={{ fontWeight:700, fontSize:14, color:"#1e1b4b" }}>{selected.name}</div>
+            <div style={{ fontSize:11, color:"#94a3b8" }}>{selected.location} · {selected.category}</div>
+          </div>
+          <button onClick={()=>{ setSelected(null); setSearch(""); }} style={{ background:"none", border:"none", color:"#94a3b8", cursor:"pointer", fontSize:18 }}>×</button>
+        </div>
+      )}
+
+      {/* NEW ASSET FORM */}
+      {newMode && (
+        <div style={{ background:"rgba(124,58,237,0.04)", border:"1.5px solid rgba(124,58,237,0.18)", borderRadius:14, padding:14, marginBottom:4 }}>
+          <div style={{ fontSize:11, color:"#7c3aed", fontWeight:700, letterSpacing:1, marginBottom:10 }}>NEW ASSET</div>
+          <Lbl>Name *</Lbl>
+          <input value={newAsset.name} onChange={e=>setNewAsset(p=>({...p,name:e.target.value}))} placeholder="e.g. Forklift #2" style={S.inp} />
+          <Lbl>Location</Lbl>
+          <input value={newAsset.location} onChange={e=>setNewAsset(p=>({...p,location:e.target.value}))} placeholder="e.g. Warehouse, Shop Floor" style={S.inp} />
+          <Lbl>Category</Lbl>
+          <select value={newAsset.category} onChange={e=>setNewAsset(p=>({...p,category:e.target.value}))} style={S.inp}>
+            {["Equipment","Filter","Electrical","Asset","Safety","Machine"].map(c=><option key={c}>{c}</option>)}
+          </select>
+          <Lbl>Detail / Notes</Lbl>
+          <input value={newAsset.detail} onChange={e=>setNewAsset(p=>({...p,detail:e.target.value}))} placeholder="e.g. Directional Valve, 480V, 3-phase" style={S.inp} />
+          <div style={{ display:"flex", alignItems:"center", gap:10, marginTop:12, marginBottom:4 }}>
+            <input type="checkbox" checked={newAsset.pmEnabled} onChange={e=>setNewAsset(p=>({...p,pmEnabled:e.target.checked}))} id="newpm" />
+            <label htmlFor="newpm" style={{ fontSize:13, color:"#475569", cursor:"pointer" }}>Add PM schedule</label>
+          </div>
+          {newAsset.pmEnabled && (
+            <>
+              <Lbl>PM Interval (days)</Lbl>
+              <input type="number" value={newAsset.intervalDays} onChange={e=>setNewAsset(p=>({...p,intervalDays:e.target.value}))} style={S.inp} />
+            </>
+          )}
+          <button onClick={()=>{ setNewMode(false); setSearch(""); }} style={{ marginTop:10, background:"none", border:"none", color:"#94a3b8", cursor:"pointer", fontFamily:"inherit", fontSize:12 }}>← Back to search</button>
+        </div>
+      )}
+
+      {/* REPAIR NOTE — shown once asset is picked/created */}
+      {(selected || newMode) && (
+        <>
+          <Lbl>Repair Notes *</Lbl>
+          <textarea
+            autoFocus={!!selected}
+            value={note}
+            onChange={e=>setNote(e.target.value)}
+            placeholder="What was wrong, what you did, parts used..."
+            style={{ ...S.inp, height:90, resize:"none", marginBottom:4 }}
+          />
+          <Lbl>Date</Lbl>
+          <input type="date" value={date} onChange={e=>setDate(e.target.value)} style={S.inp} />
+        </>
+      )}
+
+      <div style={S.mRow}>
+        <button onClick={onClose} style={S.btnG}>Cancel</button>
+        <button onClick={save} disabled={!canSave} style={{ ...S.btnP, opacity: canSave ? 1 : 0.4 }}>
+          {newMode ? "Add Asset + Log Repair" : "Log Repair"}
+        </button>
+      </div>
+    </Overlay>
+  );
+}
+
 // ─── MAIN APP ────────────────────────────────────────────────────────────────
 export default function App() {
   const [assets,     setAssets]     = useState(() => load("cbv3_assets",     INITIAL_ASSETS));
@@ -877,6 +1032,7 @@ export default function App() {
   const [toast,      setToast]      = useState(null);
   const [showHidden, setShowHidden] = useState(false);
   const [addForm,    setForm]       = useState({ name:"",location:"",category:"Filter",detail:"",intervalDays:30,pmEnabled:true });
+  const [repairModal, setRepairModal] = useState(false);
 
   useEffect(() => { save("cbv3_assets",    assets);    }, [assets]);
   useEffect(() => { save("cbv3_logs",      logs);      }, [logs]);
@@ -1030,6 +1186,17 @@ export default function App() {
         </Overlay>
       )}
 
+      {/* REPAIR MODAL */}
+      {repairModal && (
+        <RepairModal
+          assets={assets}
+          setAssets={setAssets}
+          setLogs={setLogs}
+          showToast={showToast}
+          onClose={()=>setRepairModal(false)}
+        />
+      )}
+
       {/* HEADER */}
       <header style={S.header}>
         <div style={S.hInner}>
@@ -1073,7 +1240,12 @@ export default function App() {
             <div style={S.catRow}>
               {cats.map(c=><button key={c} onClick={()=>setCat(c)} style={{...S.catBtn,...(catFilter===c?S.catOn:{})}}>{c!=="All"&&CAT_ICON[c]} {c}</button>)}
             </div>
-            <div style={{ display:"flex",justifyContent:"flex-end",marginBottom:8 }}>
+            <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:8 }}>
+              <button onClick={()=>setRepairModal(true)} style={{
+                padding:"9px 20px", borderRadius:20, border:"1.5px solid rgba(248,113,113,0.4)",
+                background:"rgba(248,113,113,0.08)", color:"#f87171", fontSize:13,
+                cursor:"pointer", fontFamily:"inherit", fontWeight:700, letterSpacing:0.3
+              }}>🔧 Log Repair</button>
               {hiddenCount > 0 && (
                 <button onClick={()=>setShowHidden(h=>!h)} style={{ padding:"6px 14px",borderRadius:20,border:"1px solid rgba(245,158,11,0.3)",background: showHidden?"rgba(245,158,11,0.1)":"rgba(255,255,255,0.6)",color:showHidden?"#f59e0b":"#94a3b8",fontSize:12,cursor:"pointer",fontFamily:"inherit",fontWeight:600 }}>
                   {showHidden ? `👁 Hiding ${hiddenCount} shown` : `👁 ${hiddenCount} hidden`}
