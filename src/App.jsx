@@ -61,6 +61,24 @@ const INITIAL_GAUGE_LOGS = [
 // ─── HELPERS ─────────────────────────────────────────────────────────────────
 function load(k, fb) { try { return JSON.parse(localStorage.getItem(k)||"null") || fb; } catch { return fb; } }
 function save(k, v)  { try { localStorage.setItem(k, JSON.stringify(v)); } catch {} }
+
+// ─── GOOGLE SHEETS BACKEND ───────────────────────────────────────────────────
+const SHEETS_URL = "https://script.google.com/macros/s/AKfycbyNZWEL8Ro0hTqBZfqEEaR13QGfEFqJhHSlULs841nDx-107gfetZN7ow87d-p-KRpFbA/exec";
+
+async function sheetsPost(action, data) {
+  try {
+    const res = await fetch(SHEETS_URL, {
+      method: "POST",
+      headers: { "Content-Type": "text/plain" },
+      body: JSON.stringify({ action, data }),
+    });
+    return await res.json();
+  } catch (err) {
+    console.warn("Sheets sync failed:", err);
+    return { success: false, error: err.toString() };
+  }
+}
+
 function fromStr(s)  { return new Date(s+"T00:00:00"); }
 function addDays(d,n){ const x=new Date(d); x.setDate(x.getDate()+n); return x; }
 function dStr(d)     { return d instanceof Date ? d.toISOString().split("T")[0] : d; }
@@ -749,6 +767,7 @@ function GaugeLog({ gaugeLogs, setGaugeLogs, assets, showToast }) {
       notes: "", photo: preview._photo, source: "photo"
     };
     setGaugeLogs(p=>[entry,...p]);
+    sheetsPost("logGauge", { ...entry, assetName: assets.find(a=>a.id===entry.assetId)?.name || "" });
     setPreview(null);
     showToast("✅ Gauge reading logged");
   };
@@ -1043,7 +1062,9 @@ export default function App() {
   function showToast(m) { setToast(m); setTimeout(()=>setToast(null), 2800); }
 
   function doLog() {
-    setLogs(p=>[...p,{ id:Date.now(),assetId:logModal.id,date:logDate,note:logNote,tech:"CB" }]);
+    const newLog = { id:Date.now(), assetId:logModal.id, date:logDate, note:logNote, tech:"CB" };
+    setLogs(p=>[...p, newLog]);
+    sheetsPost("logWorkOrder", { ...newLog, assetName: logModal.name });
     showToast(`✓ Logged: ${logModal.name}`);
     setLog(null); setNote(""); setDate(TODAY);
   }
@@ -1116,6 +1137,11 @@ export default function App() {
               photo: photoUrl || null,
             };
             setLogs(p => [newLog, ...p]);
+            sheetsPost("logPM", {
+              id: newLog.id, assetId: pmTaskModal.id, assetName: pmTaskModal.name,
+              date: TODAY, tech: "CB", tasksCompleted: checkedCount,
+              totalTasks, note, photoUrl
+            });
             showToast(`✅ PM logged for ${pmTaskModal.name}`);
             setPMTask(null);
           }}
@@ -1395,6 +1421,7 @@ function DailyWorkLog({ workEntries, setWorkEntries, showToast }) {
       tech: "CB",
     };
     setWorkEntries(p => [entry, ...p]);
+    sheetsPost("logDaily", entry);
     setText("");
     showToast("✅ Logged");
     textRef.current?.focus();
