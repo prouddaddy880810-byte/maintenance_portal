@@ -328,7 +328,7 @@ function ConfirmDelete({ name, onConfirm, onClose }) {
 }
 
 // ─── ASSET CARD ──────────────────────────────────────────────────────────────
-function AssetCard({ asset, onLog, onHistory, onEdit, onDismiss, onDelete, dismissed }) {
+function AssetCard({ asset, onLog, onPMTask, onHistory, onEdit, onDismiss, onDelete, dismissed }) {
   const { pm } = asset;
   const [confirmingDelete, setConfirmingDelete] = useState(false);
   return (
