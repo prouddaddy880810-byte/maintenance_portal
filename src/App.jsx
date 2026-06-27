@@ -1032,6 +1032,366 @@ function RepairModal({ assets, setAssets, setLogs, showToast, onClose }) {
   );
 }
 
+
+// ─── FACILITY MAP TAB ────────────────────────────────────────────────────────
+const LOCATION_GROUPS = [
+  "Upstairs", "Roof North", "Roof South", "Roof East", "Roof West",
+  "Mech Room A", "Mech Room B", "Compressor Room", "Welding Shop",
+  "Warehouse", "Basement", "Break Room", "Maintenance", "Back Maintenance", "TBD"
+];
+
+function FacilityMap({ assets, logs, onLog, onHistory, onEdit, showToast }) {
+  const [mapImage, setMapImage]       = useState(() => { try { return localStorage.getItem("cbv3_mapImage") || null; } catch { return null; } });
+  const [zones, setZones]             = useState(() => { try { return JSON.parse(localStorage.getItem("cbv3_mapZones") || "[]"); } catch { return []; } });
+  const [mode, setMode]               = useState("view");   // view | placePin | drawRect | nameZone
+  const [pendingZone, setPending]     = useState(null);     // zone being named
+  const [selectedZone, setSelected]   = useState(null);     // zone whose dashboard is open
+  const [rectStart, setRectStart]     = useState(null);     // for rect drawing
+  const [drawing, setDrawing]         = useState(null);     // live rect preview
+  const [editingZone, setEditingZone] = useState(null);     // zone being repositioned
+  const imgRef = useRef();
+
+  useEffect(() => { try { localStorage.setItem("cbv3_mapZones", JSON.stringify(zones)); } catch {} }, [zones]);
+  useEffect(() => { try { if (mapImage) localStorage.setItem("cbv3_mapImage", mapImage); } catch {} }, [mapImage]);
+
+  // ── UPLOAD MAP IMAGE ──
+  const handleImageUpload = (e) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = ev => setMapImage(ev.target.result);
+    reader.readAsDataURL(file);
+    e.target.value = "";
+  };
+
+  // ── GET RELATIVE COORDS FROM CLICK ──
+  const getRelCoords = (e) => {
+    const rect = imgRef.current?.getBoundingClientRect();
+    if (!rect) return null;
+    return {
+      x: ((e.clientX - rect.left) / rect.width)  * 100,
+      y: ((e.clientY - rect.top)  / rect.height) * 100,
+    };
+  };
+
+  // ── HANDLE MAP CLICK ──
+  const handleMapClick = (e) => {
+    if (!mapImage) return;
+    const coords = getRelCoords(e);
+    if (!coords) return;
+
+    if (mode === "placePin") {
+      setPending({ type: "pin", x: coords.x, y: coords.y, name: "", locations: [] });
+      setMode("nameZone");
+    } else if (mode === "view") {
+      // Check if clicked on a zone
+      const hit = zones.find(z => {
+        if (z.type === "pin") {
+          return Math.hypot(coords.x - z.x, coords.y - z.y) < 4;
+        } else {
+          return coords.x >= z.x && coords.x <= z.x + z.w &&
+                 coords.y >= z.y && coords.y <= z.y + z.h;
+        }
+      });
+      if (hit) setSelected(hit);
+      else setSelected(null);
+    }
+  };
+
+  // ── RECT DRAW HANDLERS ──
+  const handleMouseDown = (e) => {
+    if (mode !== "drawRect") return;
+    const coords = getRelCoords(e);
+    if (!coords) return;
+    setRectStart(coords);
+    setDrawing(null);
+  };
+
+  const handleMouseMove = (e) => {
+    if (mode !== "drawRect" || !rectStart) return;
+    const coords = getRelCoords(e);
+    if (!coords) return;
+    setDrawing({
+      x: Math.min(rectStart.x, coords.x),
+      y: Math.min(rectStart.y, coords.y),
+      w: Math.abs(coords.x - rectStart.x),
+      h: Math.abs(coords.y - rectStart.y),
+    });
+  };
+
+  const handleMouseUp = (e) => {
+    if (mode !== "drawRect" || !rectStart) return;
+    const coords = getRelCoords(e);
+    if (!coords) return;
+    const rect = {
+      x: Math.min(rectStart.x, coords.x),
+      y: Math.min(rectStart.y, coords.y),
+      w: Math.abs(coords.x - rectStart.x),
+      h: Math.abs(coords.y - rectStart.y),
+    };
+    if (rect.w < 2 || rect.h < 2) { setRectStart(null); setDrawing(null); return; }
+    setPending({ type: "rect", ...rect, name: "", locations: [] });
+    setRectStart(null);
+    setDrawing(null);
+    setMode("nameZone");
+  };
+
+  // ── SAVE ZONE ──
+  const saveZone = (name, locations) => {
+    if (!name.trim()) return;
+    const newZone = { ...pendingZone, id: Date.now(), name: name.trim(), locations };
+    setZones(p => [...p, newZone]);
+    setPending(null);
+    setMode("view");
+    showToast(`✅ Zone "${name}" added`);
+  };
+
+  const deleteZone = (id) => {
+    setZones(p => p.filter(z => z.id !== id));
+    setSelected(null);
+    showToast("🗑 Zone removed");
+  };
+
+  // ── GET ASSETS FOR ZONE ──
+  const zoneAssets = (zone) => {
+    if (!zone?.locations?.length) return [];
+    return assets.filter(a => zone.locations.includes(a.location));
+  };
+
+  // ── GET PM STATUS ──
+  const getPMStatus = (asset) => {
+    const al = logs.filter(l => l.assetId === asset.id);
+    if (!asset.pmEnabled) return "ok";
+    if (!al.length) return "overdue";
+    const last = al.sort((a,b) => new Date(b.date)-new Date(a.date))[0];
+    const next = new Date(last.date);
+    next.setDate(next.getDate() + asset.intervalDays);
+    const diff = Math.round((next - new Date()) / 86400000);
+    if (diff < 0) return "overdue";
+    if (diff <= 7) return "soon";
+    return "ok";
+  };
+
+  const statusColor = { overdue: "#f87171", soon: "#f59e0b", ok: "#10b981" };
+  const statusLabel = { overdue: "Overdue", soon: "Due Soon", ok: "OK" };
+
+  const fileRef = useRef();
+
+  // ─── ZONE NAME MODAL ───
+  if (mode === "nameZone" && pendingZone) {
+    return <ZoneNameModal
+      pending={pendingZone}
+      allLocations={LOCATION_GROUPS}
+      onSave={saveZone}
+      onCancel={() => { setPending(null); setMode("view"); }}
+    />;
+  }
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+
+      {/* TOOLBAR */}
+      <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
+        <input ref={fileRef} type="file" accept="image/*" onChange={handleImageUpload} style={{ display: "none" }} />
+        <button onClick={() => fileRef.current?.click()} style={{ padding: "10px 18px", borderRadius: 12, border: "1.5px solid rgba(124,58,237,0.3)", background: "rgba(124,58,237,0.08)", color: "#7c3aed", fontWeight: 700, fontSize: 13, cursor: "pointer", fontFamily: "inherit" }}>
+          📸 {mapImage ? "Replace Map" : "Upload Aerial Photo"}
+        </button>
+        {mapImage && (<>
+          <button onClick={() => setMode(mode === "placePin" ? "view" : "placePin")}
+            style={{ padding: "10px 16px", borderRadius: 12, border: `1.5px solid ${mode==="placePin" ? "#7c3aed" : "rgba(124,58,237,0.2)"}`, background: mode==="placePin" ? "rgba(124,58,237,0.15)" : "rgba(255,255,255,0.7)", color: mode==="placePin" ? "#7c3aed" : "#64748b", fontWeight: 700, fontSize: 13, cursor: "pointer", fontFamily: "inherit" }}>
+            📍 {mode === "placePin" ? "Tap map to pin..." : "Place Pin"}
+          </button>
+          <button onClick={() => { setMode(mode === "drawRect" ? "view" : "drawRect"); setRectStart(null); setDrawing(null); }}
+            style={{ padding: "10px 16px", borderRadius: 12, border: `1.5px solid ${mode==="drawRect" ? "#f59e0b" : "rgba(124,58,237,0.2)"}`, background: mode==="drawRect" ? "rgba(245,158,11,0.12)" : "rgba(255,255,255,0.7)", color: mode==="drawRect" ? "#f59e0b" : "#64748b", fontWeight: 700, fontSize: 13, cursor: "pointer", fontFamily: "inherit" }}>
+            ▭ {mode === "drawRect" ? "Drag on map..." : "Draw Zone"}
+          </button>
+          {zones.length > 0 && (
+            <span style={{ fontSize: 11, color: "#94a3b8", marginLeft: 4 }}>{zones.length} zone{zones.length!==1?"s":""} placed</span>
+          )}
+        </>)}
+      </div>
+
+      {/* MODE HINT */}
+      {mode !== "view" && (
+        <div style={{ padding: "10px 16px", background: "rgba(124,58,237,0.07)", border: "1px solid rgba(124,58,237,0.2)", borderRadius: 12, fontSize: 13, color: "#7c3aed", fontWeight: 600 }}>
+          {mode === "placePin" && "👆 Tap anywhere on the map to drop a pin"}
+          {mode === "drawRect" && "↖️ Click and drag on the map to draw a building zone"}
+        </div>
+      )}
+
+      {/* MAP AREA */}
+      {!mapImage ? (
+        <div onClick={() => fileRef.current?.click()} style={{ border: "2px dashed rgba(124,58,237,0.3)", borderRadius: 20, padding: "60px 20px", textAlign: "center", cursor: "pointer", background: "rgba(124,58,237,0.03)" }}>
+          <div style={{ fontSize: 48, marginBottom: 12 }}>🏭</div>
+          <div style={{ fontWeight: 800, fontSize: 17, color: "#1e1b4b", marginBottom: 6 }}>Upload Your Facility Map</div>
+          <div style={{ fontSize: 13, color: "#94a3b8" }}>Tap here to upload an aerial photo or floor plan</div>
+        </div>
+      ) : (
+        <div style={{ position: "relative", borderRadius: 20, overflow: "hidden", border: "1.5px solid rgba(124,58,237,0.15)", boxShadow: "0 8px 32px rgba(124,58,237,0.1)", cursor: mode === "placePin" ? "crosshair" : mode === "drawRect" ? "crosshair" : "default", userSelect: "none" }}
+          onClick={handleMapClick}
+          onMouseDown={handleMouseDown}
+          onMouseMove={handleMouseMove}
+          onMouseUp={handleMouseUp}
+        >
+          <img ref={imgRef} src={mapImage} alt="facility" style={{ width: "100%", display: "block", pointerEvents: "none" }} />
+
+          {/* LIVE RECT PREVIEW */}
+          {drawing && (
+            <div style={{ position: "absolute", left: `${drawing.x}%`, top: `${drawing.y}%`, width: `${drawing.w}%`, height: `${drawing.h}%`, border: "2px dashed #f59e0b", background: "rgba(245,158,11,0.12)", pointerEvents: "none" }} />
+          )}
+
+          {/* ZONES */}
+          {zones.map(zone => {
+            const za = zoneAssets(zone);
+            const overdue = za.filter(a => getPMStatus(a) === "overdue").length;
+            const soon    = za.filter(a => getPMStatus(a) === "soon").length;
+            const dotColor = overdue > 0 ? "#f87171" : soon > 0 ? "#f59e0b" : "#10b981";
+            const isSelected = selectedZone?.id === zone.id;
+
+            if (zone.type === "pin") return (
+              <div key={zone.id} onClick={e => { e.stopPropagation(); setSelected(isSelected ? null : zone); }}
+                style={{ position: "absolute", left: `${zone.x}%`, top: `${zone.y}%`, transform: "translate(-50%,-100%)", cursor: "pointer", zIndex: 10, display: "flex", flexDirection: "column", alignItems: "center" }}>
+                <div style={{ background: isSelected ? "#7c3aed" : "rgba(255,255,255,0.95)", border: `2px solid ${isSelected ? "#7c3aed" : dotColor}`, borderRadius: 10, padding: "4px 10px", fontSize: 11, fontWeight: 800, color: isSelected ? "#fff" : "#1e1b4b", whiteSpace: "nowrap", boxShadow: "0 2px 12px rgba(0,0,0,0.2)", backdropFilter: "blur(8px)" }}>
+                  {zone.name}
+                  {za.length > 0 && <span style={{ marginLeft: 6, color: isSelected ? "rgba(255,255,255,0.8)" : dotColor }}>({za.length})</span>}
+                </div>
+                <div style={{ width: 0, height: 0, borderLeft: "6px solid transparent", borderRight: "6px solid transparent", borderTop: `8px solid ${isSelected ? "#7c3aed" : dotColor}` }} />
+                {overdue > 0 && <div style={{ position: "absolute", top: -6, right: -6, width: 16, height: 16, borderRadius: "50%", background: "#f87171", color: "#fff", fontSize: 9, fontWeight: 900, display: "flex", alignItems: "center", justifyContent: "center", border: "2px solid #fff" }}>{overdue}</div>}
+              </div>
+            );
+
+            return (
+              <div key={zone.id} onClick={e => { e.stopPropagation(); setSelected(isSelected ? null : zone); }}
+                style={{ position: "absolute", left: `${zone.x}%`, top: `${zone.y}%`, width: `${zone.w}%`, height: `${zone.h}%`, border: `2px solid ${isSelected ? "#7c3aed" : dotColor}`, background: isSelected ? "rgba(124,58,237,0.15)" : `${dotColor}18`, borderRadius: 8, cursor: "pointer", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", transition: "all 0.15s" }}>
+                <div style={{ background: "rgba(255,255,255,0.92)", borderRadius: 8, padding: "3px 9px", fontSize: 11, fontWeight: 800, color: "#1e1b4b", backdropFilter: "blur(8px)", textAlign: "center", pointerEvents: "none" }}>
+                  {zone.name}
+                  {za.length > 0 && <div style={{ fontSize: 10, color: dotColor, fontWeight: 700 }}>{overdue > 0 ? `⚠ ${overdue} overdue` : soon > 0 ? `${soon} due soon` : `✓ ${za.length} OK`}</div>}
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      )}
+
+      {/* ZONE MINI DASHBOARD */}
+      {selectedZone && (
+        <ZoneDashboard
+          zone={selectedZone}
+          assets={zoneAssets(selectedZone)}
+          logs={logs}
+          getPMStatus={getPMStatus}
+          statusColor={statusColor}
+          statusLabel={statusLabel}
+          onLog={onLog}
+          onHistory={onHistory}
+          onEdit={onEdit}
+          onDelete={() => deleteZone(selectedZone.id)}
+          onClose={() => setSelected(null)}
+        />
+      )}
+    </div>
+  );
+}
+
+// ─── ZONE NAME MODAL ─────────────────────────────────────────────────────────
+function ZoneNameModal({ pending, allLocations, onSave, onCancel }) {
+  const [name, setName]       = useState("");
+  const [selected, setSelected] = useState([]);
+  const toggle = (loc) => setSelected(p => p.includes(loc) ? p.filter(x=>x!==loc) : [...p, loc]);
+  return (
+    <div style={{ background: "rgba(255,255,255,0.92)", border: "1.5px solid rgba(124,58,237,0.2)", borderRadius: 20, padding: 24, boxShadow: "0 8px 40px rgba(124,58,237,0.15)" }}>
+      <div style={{ fontWeight: 800, fontSize: 17, color: "#1e1b4b", marginBottom: 4 }}>
+        {pending.type === "pin" ? "📍 Name This Pin" : "▭ Name This Zone"}
+      </div>
+      <div style={{ fontSize: 12, color: "#94a3b8", marginBottom: 16 }}>Give it a name and link your asset locations to it</div>
+
+      <div style={{ fontSize: 11, color: "#94a3b8", fontWeight: 600, marginBottom: 6 }}>ZONE NAME</div>
+      <input autoFocus value={name} onChange={e => setName(e.target.value)}
+        placeholder="e.g. Main Building, North Roof, Compressor Room"
+        style={{ width: "100%", padding: "10px 14px", borderRadius: 12, border: "1.5px solid rgba(124,58,237,0.2)", background: "rgba(124,58,237,0.04)", fontSize: 14, fontFamily: "inherit", color: "#1e1b4b", boxSizing: "border-box", marginBottom: 16 }} />
+
+      <div style={{ fontSize: 11, color: "#94a3b8", fontWeight: 600, marginBottom: 8 }}>LINK ASSET LOCATIONS ({selected.length} selected)</div>
+      <div style={{ display: "flex", flexWrap: "wrap", gap: 7, marginBottom: 20 }}>
+        {allLocations.map(loc => (
+          <button key={loc} onClick={() => toggle(loc)} style={{ padding: "6px 13px", borderRadius: 20, border: `1.5px solid ${selected.includes(loc) ? "#7c3aed" : "rgba(124,58,237,0.15)"}`, background: selected.includes(loc) ? "rgba(124,58,237,0.12)" : "rgba(255,255,255,0.7)", color: selected.includes(loc) ? "#7c3aed" : "#64748b", fontSize: 12, fontWeight: selected.includes(loc) ? 700 : 400, cursor: "pointer", fontFamily: "inherit" }}>
+            {selected.includes(loc) ? "✓ " : ""}{loc}
+          </button>
+        ))}
+      </div>
+
+      <div style={{ display: "flex", gap: 10 }}>
+        <button onClick={onCancel} style={{ flex: 1, padding: "11px 0", borderRadius: 12, border: "1px solid rgba(148,163,184,0.3)", background: "rgba(255,255,255,0.7)", color: "#64748b", fontWeight: 600, fontSize: 13, cursor: "pointer", fontFamily: "inherit" }}>Cancel</button>
+        <button onClick={() => onSave(name, selected)} disabled={!name.trim()} style={{ flex: 2, padding: "11px 0", borderRadius: 12, border: "none", background: name.trim() ? "linear-gradient(135deg,#7c3aed,#a855f7)" : "rgba(148,163,184,0.3)", color: "#fff", fontWeight: 800, fontSize: 13, cursor: name.trim() ? "pointer" : "not-allowed", fontFamily: "inherit" }}>
+          Save Zone
+        </button>
+      </div>
+    </div>
+  );
+}
+
+// ─── ZONE MINI DASHBOARD ─────────────────────────────────────────────────────
+function ZoneDashboard({ zone, assets, logs, getPMStatus, statusColor, statusLabel, onLog, onHistory, onEdit, onDelete, onClose }) {
+  const overdue = assets.filter(a => getPMStatus(a) === "overdue");
+  const soon    = assets.filter(a => getPMStatus(a) === "soon");
+  const ok      = assets.filter(a => getPMStatus(a) === "ok");
+
+  return (
+    <div style={{ background: "rgba(255,255,255,0.9)", border: "1.5px solid rgba(124,58,237,0.2)", borderRadius: 20, overflow: "hidden", boxShadow: "0 8px 40px rgba(124,58,237,0.12)", backdropFilter: "blur(20px)" }}>
+      {/* HEADER */}
+      <div style={{ padding: "16px 20px", borderBottom: "1px solid rgba(124,58,237,0.08)", display: "flex", justifyContent: "space-between", alignItems: "center", background: "linear-gradient(135deg,rgba(124,58,237,0.06),rgba(168,85,247,0.04))" }}>
+        <div>
+          <div style={{ fontWeight: 800, fontSize: 17, color: "#1e1b4b" }}>{zone.name}</div>
+          <div style={{ fontSize: 11, color: "#94a3b8", marginTop: 2 }}>{assets.length} asset{assets.length!==1?"s":""} in this zone</div>
+        </div>
+        <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+          <button onClick={onDelete} style={{ padding: "5px 10px", borderRadius: 8, border: "1px solid rgba(248,113,113,0.3)", background: "rgba(248,113,113,0.08)", color: "#f87171", fontSize: 11, cursor: "pointer", fontFamily: "inherit" }}>🗑 Remove</button>
+          <button onClick={onClose} style={{ background: "none", border: "none", fontSize: 20, color: "#94a3b8", cursor: "pointer" }}>✕</button>
+        </div>
+      </div>
+
+      {/* STAT ROW */}
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(3,1fr)", gap: 0, borderBottom: "1px solid rgba(124,58,237,0.08)" }}>
+        {[["⚠", overdue.length, "Overdue", "#f87171"], ["⏱", soon.length, "Due Soon", "#f59e0b"], ["✓", ok.length, "OK", "#10b981"]].map(([icon, n, label, color]) => (
+          <div key={label} style={{ padding: "14px 0", textAlign: "center", borderRight: label!=="OK" ? "1px solid rgba(124,58,237,0.06)" : "none" }}>
+            <div style={{ fontSize: 22, fontWeight: 900, color }}>{n}</div>
+            <div style={{ fontSize: 10, color: "#94a3b8", fontWeight: 600, marginTop: 2 }}>{label}</div>
+          </div>
+        ))}
+      </div>
+
+      {/* ASSET LIST */}
+      <div style={{ padding: "12px 16px", maxHeight: 320, overflowY: "auto" }}>
+        {assets.length === 0 ? (
+          <div style={{ textAlign: "center", padding: "24px 0", color: "#94a3b8", fontSize: 13 }}>No assets linked to this zone yet</div>
+        ) : (
+          <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+            {[...assets].sort((a,b) => {
+              const o = { overdue:0, soon:1, ok:2 };
+              return o[getPMStatus(a)] - o[getPMStatus(b)];
+            }).map(asset => {
+              const st = getPMStatus(asset);
+              const color = statusColor[st];
+              return (
+                <div key={asset.id} style={{ display: "flex", alignItems: "center", gap: 12, padding: "10px 12px", background: "rgba(255,255,255,0.7)", border: `1.5px solid ${color}25`, borderLeft: `4px solid ${color}`, borderRadius: 12 }}>
+                  <div style={{ width: 8, height: 8, borderRadius: "50%", background: color, flexShrink: 0 }} />
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <div style={{ fontWeight: 700, fontSize: 13, color: "#1e1b4b", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{asset.name}</div>
+                    <div style={{ fontSize: 10, color: "#94a3b8" }}>{asset.location} · <span style={{ color, fontWeight: 600 }}>{statusLabel[st]}</span></div>
+                  </div>
+                  <div style={{ display: "flex", gap: 6, flexShrink: 0 }}>
+                    <button onClick={() => onHistory(asset)} style={{ padding: "4px 9px", borderRadius: 7, border: "1px solid rgba(124,58,237,0.2)", background: "rgba(124,58,237,0.06)", color: "#7c3aed", fontSize: 11, cursor: "pointer", fontFamily: "inherit" }}>History</button>
+                    <button onClick={() => onLog(asset)} style={{ padding: "4px 9px", borderRadius: 7, border: "none", background: "rgba(124,58,237,0.12)", color: "#7c3aed", fontSize: 11, fontWeight: 700, cursor: "pointer", fontFamily: "inherit" }}>Log</button>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
 // ─── MAIN APP ────────────────────────────────────────────────────────────────
 export default function App() {
   const [assets,     setAssets]     = useState(() => load("cbv3_assets",     INITIAL_ASSETS));
@@ -1101,6 +1461,7 @@ export default function App() {
 
   const TABS = [
     ["dashboard",  "Dashboard"],
+    ["map",        "🗺 Facility Map"],
     ["machines",   "🏭 Machines"],
     ["gauge",      "⚡ Gauge Log"],
     ["history",    "PM History"],
@@ -1306,6 +1667,18 @@ export default function App() {
         {/* DAILY WORK LOG */}
         {tab==="worklog" && (
           <DailyWorkLog workEntries={workEntries} setWorkEntries={setWorkEntries} showToast={showToast} />
+        )}
+
+        {/* FACILITY MAP */}
+        {tab==="map" && (
+          <FacilityMap
+            assets={assets}
+            logs={logs}
+            onLog={a=>setLog(a)}
+            onHistory={a=>setHist(a)}
+            onEdit={a=>setEditAsset(a)}
+            showToast={showToast}
+          />
         )}
 
         {/* PM HISTORY */}
