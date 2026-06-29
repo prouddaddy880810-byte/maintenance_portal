@@ -439,7 +439,7 @@ const INITIAL_MACHINES = [
   },
   {
     id: 2017,
-    name: "Kohler Urinal — Men\'s Restroom",
+    name: "Kohler Urinal — Mens Restroom",
     assetTag: "PLMB-UR-01",
     make: "Kohler",
     model: "Urinal",
@@ -454,7 +454,7 @@ const INITIAL_MACHINES = [
     weight: null,
     year: null,
     category: "Asset",
-    location: "Men\'s Restroom",
+    location: "Mens Restroom",
     description: "Kohler urinal. Hardwater/calcium buildup ongoing. Leaking from bottom. Whole unit leaks. Clogs repeatedly. Snaked — still issues. Likely needs line replacement or full unit replacement.",
     pmIntervalDays: 90,
     additionalSpecs: { issue: "Ongoing clogs + leak from bottom + hardwater buildup. Should replace line." },
@@ -567,8 +567,8 @@ const INITIAL_WATCH_ITEMS = [
   {
     id: 9003,
     assetId: 2017,
-    assetName: "Kohler Urinal — Men\'s Restroom",
-    assetLocation: "Men\'s Restroom",
+    assetName: "Kohler Urinal — Mens Restroom",
+    assetLocation: "Mens Restroom",
     assetCategory: "Asset",
     priority: "medium",
     note: "Ongoing clogs. Whole unit leaks at bottom. Hardwater/calcium buildup. Snaked — still having issues. Likely needs supply line replacement or full unit swap.",
@@ -2276,26 +2276,27 @@ function ZoneDashboard({ zone, assets, logs, getPMStatus, statusColor, statusLab
 }
 
 // ─── MAIN APP ────────────────────────────────────────────────────────────────
+const INITIAL_WORK_ENTRIES = [
+  { id:8001, timestamp:1742860800000, date:"2026-03-25", time:"All day", text:"Toyota Forklift #55 (FL-55): Changed hydraulic hose — had to lift floor panel to access reservoir. Topped hydraulic fluid. 30-inch hose.", tag:"🔧 Repair", tech:"CB" },
+  { id:8002, timestamp:1742947200000, date:"2026-03-25", time:"All day", text:"5030 Tru Laser (LASER-5030): Replaced clear hose with black hose in Laser House.", tag:"🔧 Repair", tech:"CB" },
+  { id:8003, timestamp:1742515200000, date:"2026-03-19", time:"All day", text:"Installed brand new fan on machining equipment in new building.", tag:"🔧 Repair", tech:"CB" },
+  { id:8004, timestamp:1742515200000, date:"2026-03-19", time:"All day", text:"Replaced door hinges in new building.", tag:"🔧 Repair", tech:"CB" },
+  { id:8005, timestamp:1742428800000, date:"2026-03-18", time:"All day", text:"March 18 — Check on Contactor #64. Status: pending.", tag:"⚡ Electrical", tech:"CB" },
+  { id:8006, timestamp:1742428800000, date:"2026-03-18", time:"All day", text:"March 18 — Cleaned oil spill on shop floor.", tag:"🧹 Housekeeping", tech:"CB" },
+  { id:8007, timestamp:1742428800000, date:"2026-03-18", time:"All day", text:"March 18 — Trailer hydraulic leak: need to move trailer to access. Also need to find hanger bracket.", tag:"🔧 Repair", tech:"CB" },
+  { id:8008, timestamp:1742947200000, date:"2026-03-26", time:"All day", text:"Floor Scrubber (SCRUB-01): Replaced 2x pulleys + 1 more. Fixed 2 flat tires.", tag:"🔧 Repair", tech:"CB" },
+  { id:8009, timestamp:1742947200000, date:"2026-03-26", time:"All day", text:"Mens Restroom Kohler Urinal: Ongoing clogs + whole unit leaking at bottom. Snaked line. Blew out vent. Hardwater/calcium buildup. Needs line replacement or full unit swap.", tag:"🔧 Repair", tech:"CB" },
+  { id:8010, timestamp:1742947200000, date:"2026-03-26", time:"All day", text:"Womens Bathroom Toilets: Worked on toilet issues (3-26-26).", tag:"🔧 Repair", tech:"CB" },
+  { id:8011, timestamp:1743120000000, date:"2026-03-28", time:"All day", text:"March 28 — New building setup: AC Compressors WC-730 Atlas (118 CFM-7150) noted. Machine Filter Maintenance schedule and protocol to be created for new building.", tag:"🔩 PM", tech:"CB" },
+  { id:8012, timestamp:1743120000000, date:"2026-03-28", time:"All day", text:"March 28 — WC Robot 418 (ROBOT-418): Needs air filtration system installed. Look at laser setup for CFM reference. Filter Bank for new building needs scheduling.", tag:"📸 Inspection", tech:"CB" },
+  { id:8013, timestamp:1743379200000, date:"2026-03-30", time:"7:00 AM", text:"Cart Maint Log — Mon March 30: Checked Battery, Tires, Headlight, Horn on all carts.", tag:"🔩 PM", tech:"CB" },
+];
+
 export default function App() {
   const [assets,     setAssets]     = useState(() => load("cbv3_assets",     INITIAL_ASSETS));
   const [logs,       setLogs]       = useState(() => load("cbv3_logs",       INITIAL_LOGS));
   const [machines,   setMachines]   = useState(() => load("cbv3_machines",   INITIAL_MACHINES));
   const [gaugeLogs,  setGaugeLogs]  = useState(() => load("cbv3_gaugeLogs",  INITIAL_GAUGE_LOGS));
-  const INITIAL_WORK_ENTRIES = [
-    { id:8001, timestamp:1742860800000, date:"2026-03-25", time:"All day", text:"Toyota Forklift #55 (FL-55): Changed hydraulic hose — had to lift floor panel to access reservoir. Topped hydraulic fluid. 30-inch hose.", tag:"🔧 Repair", tech:"CB" },
-    { id:8002, timestamp:1742947200000, date:"2026-03-25", time:"All day", text:"5030 Tru Laser (LASER-5030): Replaced clear hose with black hose in Laser House.", tag:"🔧 Repair", tech:"CB" },
-    { id:8003, timestamp:1742515200000, date:"2026-03-19", time:"All day", text:"Installed brand new fan on machining equipment in new building.", tag:"🔧 Repair", tech:"CB" },
-    { id:8004, timestamp:1742515200000, date:"2026-03-19", time:"All day", text:"Replaced door hinges in new building.", tag:"🔧 Repair", tech:"CB" },
-    { id:8005, timestamp:1742428800000, date:"2026-03-18", time:"All day", text:"March 18 — Check on Contactor #64. Status: pending.", tag:"⚡ Electrical", tech:"CB" },
-    { id:8006, timestamp:1742428800000, date:"2026-03-18", time:"All day", text:"March 18 — Cleaned oil spill on shop floor.", tag:"🧹 Housekeeping", tech:"CB" },
-    { id:8007, timestamp:1742428800000, date:"2026-03-18", time:"All day", text:"March 18 — Trailer hydraulic leak: need to move trailer to access. Also need to find hanger bracket.", tag:"🔧 Repair", tech:"CB" },
-    { id:8008, timestamp:1742947200000, date:"2026-03-26", time:"All day", text:"Floor Scrubber (SCRUB-01): Replaced 2x pulleys + 1 more. Fixed 2 flat tires.", tag:"🔧 Repair", tech:"CB" },
-    { id:8009, timestamp:1742947200000, date:"2026-03-26", time:"All day", text:"Men\'s Restroom Kohler Urinal: Ongoing clogs + whole unit leaking at bottom. Snaked line. Blew out vent. Hardwater/calcium buildup. Needs line replacement or full unit swap.", tag:"🔧 Repair", tech:"CB" },
-    { id:8010, timestamp:1742947200000, date:"2026-03-26", time:"All day", text:"Women\'s Bathroom Toilets: Worked on toilet issues (3-26-26).", tag:"🔧 Repair", tech:"CB" },
-    { id:8011, timestamp:1743120000000, date:"2026-03-28", time:"All day", text:"March 28 — New building setup: AC Compressors WC-730 Atlas (118 CFM-7150) noted. Machine Filter Maintenance schedule & protocol to be created for new building.", tag:"🔩 PM", tech:"CB" },
-    { id:8012, timestamp:1743120000000, date:"2026-03-28", time:"All day", text:"March 28 — WC Robot 418 (ROBOT-418): Needs air filtration system installed. Look at laser setup for CFM reference. Filter Bank for new building needs scheduling.", tag:"📸 Inspection", tech:"CB" },
-    { id:8013, timestamp:1743379200000, date:"2026-03-30", time:"7:00 AM", text:"Cart Maint Log — Mon March 30: Checked Battery, Tires, Headlight, Horn on all carts.", tag:"🔩 PM", tech:"CB" },
-  ];
   const [workEntries, setWorkEntries] = useState(() => load("cbv3_workEntries", INITIAL_WORK_ENTRIES));
   const [tab,        setTab]        = useState("dashboard");
   const [catFilter,  setCat]        = useState("All");
