@@ -98,7 +98,64 @@ function getPM(asset, logs) {
 }
 
 // ─── AI HELPERS ──────────────────────────────────────────────────────────────
-async function aiParseImage(base64, prompt) {
+// Legacy wrapper — use aiCall directly for new features
+async function aiParseImage(base64, prompt) { return aiCall(prompt, base64); }
+
+const GAUGE_PROMPT = `Parse this compressor/equipment display and return ONLY valid JSON, no markdown:
+{"pressure":null,"temp":null,"timeDisplay":null,"status":null,"keyMode":null,"runHours":null,"loadHours":null,"maintenanceIn":null,"extraFields":{}}
+Fill in any values visible. Use null for anything not shown.`;
+
+const NAMEPLATE_PROMPT = `Parse this machine/equipment nameplate photo and return ONLY valid JSON, no markdown:
+{"make":null,"model":null,"serialNumber":null,"partNumber":null,"voltage":null,"amperage":null,"horsepower":null,"rpm":null,"phase":null,"hz":null,"weight":null,"year":null,"category":null,"description":null,"suggestedName":null,"suggestedId":null,"pmIntervalDays":null,"additionalSpecs":{}}
+- suggestedName: short operational name like "CNC Mill-01" or "Tube Laser-01"
+- suggestedId: short tag like "MILL-01", "TL-01", "COMP-02"
+- category: one of Filter/Equipment/Electrical/Asset/Safety/Machine
+- pmIntervalDays: suggested PM interval based on equipment type (null if unknown)
+Fill everything visible. Use null for missing fields.`;
+
+const JOURNAL_PROMPT = `This is a photo of a maintenance technician's handwritten journal/notes page.
+Extract ALL information you can read and return ONLY valid JSON, no markdown:
+{
+  "machines": [
+    {
+      "name": null,
+      "make": null,
+      "model": null,
+      "serialNumber": null,
+      "partNumber": null,
+      "voltage": null,
+      "amperage": null,
+      "horsepower": null,
+      "rpm": null,
+      "phase": null,
+      "location": null,
+      "description": null,
+      "notes": null,
+      "category": null,
+      "suggestedName": null,
+      "suggestedId": null,
+      "pmIntervalDays": null
+    }
+  ],
+  "repairNotes": [
+    { "equipment": null, "issue": null, "action": null, "date": null, "parts": null }
+  ],
+  "generalNotes": [],
+  "rawText": ""
+}
+- Extract every machine, piece of equipment, or asset mentioned
+- Extract any repair entries, issues noted, or work performed
+- generalNotes: any misc notes, measurements, to-dos that don't fit above
+- rawText: transcribe ALL handwritten text you can read verbatim
+- category: one of Filter/Equipment/Electrical/Asset/Safety/Machine
+- pmIntervalDays: infer from equipment type if not stated
+Do your best even if handwriting is messy. Include partial data rather than skipping entries.`;
+
+// AI call with optional image (null base64 = text-only)
+async function aiCall(prompt, base64 = null) {
+  const content = [];
+  if (base64) content.push({ type:"image", source:{ type:"base64", media_type:"image/jpeg", data:base64 }});
+  content.push({ type:"text", text:prompt });
   const resp = await fetch("https://api.anthropic.com/v1/messages", {
     method:"POST",
     headers:{
@@ -107,13 +164,7 @@ async function aiParseImage(base64, prompt) {
       "anthropic-version": "2023-06-01",
       "anthropic-dangerous-direct-browser-access": "true"
     },
-    body: JSON.stringify({
-      model:"claude-sonnet-4-6", max_tokens:1000,
-      messages:[{ role:"user", content:[
-        { type:"image", source:{ type:"base64", media_type:"image/jpeg", data:base64 }},
-        { type:"text", text:prompt }
-      ]}]
-    })
+    body: JSON.stringify({ model:"claude-sonnet-4-6", max_tokens:2000, messages:[{ role:"user", content }]})
   });
   const data = await resp.json();
   const text = data.content?.find(b=>b.type==="text")?.text || "{}";
@@ -121,17 +172,21 @@ async function aiParseImage(base64, prompt) {
   catch { return null; }
 }
 
-const GAUGE_PROMPT = `Parse this compressor/equipment display and return ONLY valid JSON, no markdown:
-{"pressure":null,"temp":null,"timeDisplay":null,"status":null,"keyMode":null,"runHours":null,"loadHours":null,"maintenanceIn":null,"extraFields":{}}
-Fill in any values visible. Use null for anything not shown.`;
-
-const NAMEPLATE_PROMPT = `Parse this machine/equipment nameplate and return ONLY valid JSON, no markdown:
-{"make":null,"model":null,"serialNumber":null,"partNumber":null,"voltage":null,"amperage":null,"horsepower":null,"rpm":null,"phase":null,"hz":null,"weight":null,"year":null,"category":null,"description":null,"suggestedName":null,"suggestedId":null,"pmIntervalDays":null,"additionalSpecs":{}}
-- suggestedName: short operational name like "CNC Mill-01" or "Tube Laser-01"  
-- suggestedId: short tag like "MILL-01", "TL-01", "COMP-02"
+async function aiNameLookup(machineName) {
+  const prompt = `You are an industrial equipment database. A maintenance technician typed this machine name: "${machineName}"
+Research this equipment and return ONLY valid JSON, no markdown:
+{"make":null,"model":null,"voltage":null,"amperage":null,"horsepower":null,"rpm":null,"phase":null,"hz":null,"weight":null,"category":null,"description":null,"suggestedName":null,"suggestedId":null,"pmIntervalDays":null,"commonIssues":[],"pmTasks":[],"additionalSpecs":{}}
+- Fill typical/common specs for this equipment type
+- suggestedName: clean operational name (e.g. "Kaeser Compressor-01")
+- suggestedId: short tag (e.g. "COMP-01")
 - category: one of Filter/Equipment/Electrical/Asset/Safety/Machine
-- pmIntervalDays: suggested PM interval based on equipment type (null if unknown)
-Fill everything visible. Use null for missing fields.`;
+- pmIntervalDays: standard PM interval for this type
+- commonIssues: typical failure points (up to 5)
+- pmTasks: recommended PM checklist items (up to 8)
+- description: note which specs are typical/estimated vs confirmed
+Fill what you can even with partial info.`;
+  return aiCall(prompt);
+}
 
 
 // ─── DEFAULT PM TASKS PER CATEGORY ──────────────────────────────────────────
@@ -468,6 +523,37 @@ function MachineDB({ machines, setMachines, showToast }) {
   const [search,      setSearch]      = useState("");
   const [sessionLog,  setSessionLog]  = useState([]);     // today's scan session
   const [sessionMode, setSessionMode] = useState(false);
+  const [nameQuery,   setNameQuery]   = useState("");
+  const [nameLooking, setNameLooking] = useState(false);
+  const [journalMode, setJournalMode] = useState(false);
+  const [journalResults, setJournalResults] = useState(null);
+
+  const handleNameLookup = async () => {
+    if (!nameQuery.trim()) return;
+    setNameLooking(true);
+    setPreview(null); setDecision(null);
+    try {
+      const parsed = await aiNameLookup(nameQuery.trim());
+      if (!parsed) throw new Error("lookup failed");
+      setPreview({ ...parsed, _photo: null, _fromNameLookup: true, _nameQuery: nameQuery.trim() });
+    } catch {
+      showToast("⚠️ Couldn't look up that equipment name — try being more specific");
+    }
+    setNameLooking(false);
+  };
+
+  const handleJournalScan = useCallback(async (base64, dataUrl) => {
+    setScanning(true);
+    setJournalResults(null);
+    try {
+      const parsed = await aiCall(JOURNAL_PROMPT, base64);
+      if (!parsed) throw new Error("parse failed");
+      setJournalResults({ ...parsed, _photo: dataUrl });
+    } catch {
+      showToast("⚠️ Couldn't parse journal — try better lighting");
+    }
+    setScanning(false);
+  }, [showToast]);
 
   const handleScan = useCallback(async (base64, dataUrl) => {
     setScanning(true);
@@ -475,7 +561,7 @@ function MachineDB({ machines, setMachines, showToast }) {
     setDecision(null);
     setMergeTarget(null);
     try {
-      const parsed = await aiParseImage(base64, NAMEPLATE_PROMPT);
+      const parsed = await aiCall(NAMEPLATE_PROMPT, base64);
       if (!parsed) throw new Error("parse failed");
       setPreview({ ...parsed, _photo: dataUrl });
     } catch {
@@ -513,7 +599,19 @@ function MachineDB({ machines, setMachines, showToast }) {
   const DecisionScreen = () => (
     <div style={{ background:"rgba(124,58,237,0.07)",border:"2px solid rgba(124,58,237,0.35)",borderRadius:18,padding:20,marginBottom:20 }}>
       {/* Parsed summary */}
-      <div style={{ fontWeight:800,color:"#7c3aed",fontSize:15,marginBottom:10 }}>📸 Nameplate Scanned</div>
+      <div style={{ display:"flex",alignItems:"center",gap:10,marginBottom:10,flexWrap:"wrap" }}>
+        <div style={{ fontWeight:800,color:"#7c3aed",fontSize:15 }}>
+          {preview._fromNameLookup ? "🔍 Name Lookup Result" : "📸 Nameplate Scanned"}
+        </div>
+        {preview._fromNameLookup && (
+          <span style={{ fontSize:10,fontWeight:700,padding:"3px 10px",borderRadius:20,background:"rgba(245,158,11,0.12)",border:"1px solid rgba(245,158,11,0.3)",color:"#f59e0b" }}>
+            ⚠️ Specs are typical/estimated — verify before relying on them
+          </span>
+        )}
+      </div>
+      {preview._fromNameLookup && preview._nameQuery && (
+        <div style={{ fontSize:12,color:"#94a3b8",marginBottom:10 }}>Researched: <strong style={{color:"#1e1b4b"}}>"{preview._nameQuery}"</strong></div>
+      )}
       <div style={{ display:"grid",gridTemplateColumns:"repeat(2,1fr)",gap:6,marginBottom:14 }}>
         {[["Name",preview.suggestedName],["Tag",preview.suggestedId],["Make",preview.make],["Model",preview.model],["Serial",preview.serialNumber],["Voltage",preview.voltage],["HP",preview.horsepower],["RPM",preview.rpm],["Phase",preview.phase],["Year",preview.year]].filter(([,v])=>v).map(([k,v])=>(
           <div key={k} style={{ background:"rgba(255,255,255,0.7)",borderRadius:8,padding:"6px 10px" }}>
@@ -595,24 +693,70 @@ function MachineDB({ machines, setMachines, showToast }) {
         </div>
       )}
 
-      {/* SCAN + SESSION CONTROLS */}
-      <div style={{ display:"flex",gap:10,marginBottom:16,flexWrap:"wrap",alignItems:"center" }}>
-        <PhotoCapture onCapture={handleScan} label={scanning?"⏳ Reading...":"📸 Scan Nameplate"} loading={scanning} />
-        {!sessionMode && (
-          <button onClick={()=>setSessionMode(true)} style={{ padding:"12px 18px",background:"rgba(255,255,255,0.7)",border:"1.5px solid rgba(124,58,237,0.2)",borderRadius:12,color:"#7c3aed",fontWeight:700,fontSize:13,cursor:"pointer" }}>
-            🏃 Start Scan Session
+      {/* SCAN + LOOKUP CONTROLS */}
+      <div style={{ background:"rgba(255,255,255,0.6)",border:"1.5px solid rgba(124,58,237,0.12)",borderRadius:18,padding:16,marginBottom:16 }}>
+        <div style={{ fontSize:10,letterSpacing:1.5,fontWeight:700,color:"#94a3b8",textTransform:"uppercase",marginBottom:12 }}>Add Machine — 3 ways</div>
+
+        {/* ROW 1: Scan nameplate photo */}
+        <div style={{ display:"flex",gap:8,alignItems:"center",marginBottom:10,flexWrap:"wrap" }}>
+          <div style={{ fontSize:11,color:"#7c3aed",fontWeight:700,minWidth:22 }}>①</div>
+          <PhotoCapture onCapture={handleScan} label={scanning?"⏳ Reading...":"📸 Scan Nameplate"} loading={scanning} />
+          {sessionMode && <PhotoCapture onCapture={handleScan} label="📸 Next Plate" loading={scanning} />}
+          {!sessionMode && (
+            <button onClick={()=>setSessionMode(true)} style={{ padding:"10px 14px",background:"rgba(255,255,255,0.7)",border:"1.5px solid rgba(124,58,237,0.2)",borderRadius:10,color:"#7c3aed",fontWeight:700,fontSize:12,cursor:"pointer" }}>
+              🏃 Session Mode
+            </button>
+          )}
+        </div>
+
+        {/* ROW 2: No plate? Type the name */}
+        <div style={{ display:"flex",gap:8,alignItems:"center",marginBottom:10,flexWrap:"wrap" }}>
+          <div style={{ fontSize:11,color:"#7c3aed",fontWeight:700,minWidth:22 }}>②</div>
+          <input
+            value={nameQuery}
+            onChange={e=>setNameQuery(e.target.value)}
+            onKeyDown={e=>{ if(e.key==="Enter") handleNameLookup(); }}
+            placeholder="No plate? Type machine name (e.g. Kaeser SM 11, Lincoln welder...)"
+            style={{ ...S.inp, flex:1, minWidth:200, fontSize:13, padding:"10px 14px" }}
+          />
+          <button
+            onClick={handleNameLookup}
+            disabled={!nameQuery.trim() || nameLooking}
+            style={{ padding:"10px 16px",background:nameLooking?"rgba(124,58,237,0.08)":"linear-gradient(135deg,#7c3aed,#a855f7)",border:"none",borderRadius:10,color:nameLooking?"#7c3aed":"#fff",fontWeight:800,fontSize:12,cursor:nameQuery.trim()&&!nameLooking?"pointer":"not-allowed",opacity:nameQuery.trim()?1:0.5,whiteSpace:"nowrap" }}
+          >
+            {nameLooking ? "⏳ Looking..." : "🔍 Look Up"}
           </button>
-        )}
-        {sessionMode && (
-          <PhotoCapture onCapture={handleScan} label="📸 Next Plate" loading={scanning} />
-        )}
-        <div style={{ fontSize:12,color:"#94a3b8",alignSelf:"center",flex:1,minWidth:120 }}>
+        </div>
+
+        {/* ROW 3: Scan journal page */}
+        <div style={{ display:"flex",gap:8,alignItems:"center",flexWrap:"wrap" }}>
+          <div style={{ fontSize:11,color:"#7c3aed",fontWeight:700,minWidth:22 }}>③</div>
+          <PhotoCapture
+            onCapture={handleJournalScan}
+            label={scanning?"⏳ Parsing...":"📓 Scan Journal Page"}
+            loading={scanning}
+          />
+          <div style={{ fontSize:11,color:"#94a3b8",flex:1 }}>Parse handwritten notes — extracts all machines, repairs, and specs at once</div>
+        </div>
+
+        <div style={{ marginTop:10,fontSize:11,color:"#94a3b8",textAlign:"right" }}>
           {machines.length} machine{machines.length!==1?"s":""} in database
         </div>
       </div>
 
+      {/* JOURNAL RESULTS */}
+      {journalResults && (
+        <JournalReview
+          results={journalResults}
+          machines={machines}
+          onAddMachine={(m)=>{ setMachines(p=>[{...parsedToMachine(m),id:Date.now()},...p]); showToast(`✅ Added: ${m.suggestedName||m.name}`); }}
+          onDismiss={()=>setJournalResults(null)}
+          showToast={showToast}
+        />
+      )}
+
       {/* DECISION SCREEN */}
-      {preview && <DecisionScreen />}
+      {preview && !journalResults && <DecisionScreen />}
 
       {/* SEARCH + FILTER */}
       {machines.length > 0 && !preview && (
@@ -697,6 +841,150 @@ function NewAssetForm({ preview, onConfirm, onBack }) {
     </div>
   );
 }
+
+// ─── JOURNAL REVIEW COMPONENT ────────────────────────────────────────────────
+function JournalReview({ results, machines, onAddMachine, onDismiss, showToast }) {
+  const [addedIds, setAddedIds] = useState(new Set());
+  const [activeTab, setActiveTab] = useState("machines");
+
+  const machineList  = results.machines  || [];
+  const repairList   = results.repairNotes || [];
+  const generalNotes = results.generalNotes || [];
+  const rawText      = results.rawText || "";
+
+  function addMachine(m, idx) {
+    const entry = {
+      ...m,
+      suggestedName: m.suggestedName || m.name || "Unknown Machine",
+      suggestedId:   m.suggestedId   || "ASSET-" + (idx+1),
+      category:      m.category      || "Machine",
+    };
+    onAddMachine(entry);
+    setAddedIds(prev => new Set([...prev, idx]));
+  }
+
+  const tabStyle = (k) => ({
+    padding:"7px 16px", borderRadius:20, fontSize:12, fontWeight:600,
+    cursor:"pointer", fontFamily:"inherit",
+    background: activeTab===k ? "rgba(124,58,237,0.12)" : "rgba(255,255,255,0.6)",
+    border: `1px solid ${activeTab===k ? "rgba(124,58,237,0.4)" : "rgba(124,58,237,0.12)"}`,
+    color: activeTab===k ? "#7c3aed" : "#64748b",
+  });
+
+  return (
+    <div style={{ background:"rgba(124,58,237,0.05)",border:"2px solid rgba(124,58,237,0.25)",borderRadius:20,padding:20,marginBottom:20 }}>
+      <div style={{ display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:16,flexWrap:"wrap",gap:10 }}>
+        <div>
+          <div style={{ fontWeight:800,fontSize:16,color:"#7c3aed",marginBottom:4 }}>📓 Journal Parsed</div>
+          <div style={{ fontSize:12,color:"#94a3b8" }}>
+            {machineList.length} machine{machineList.length!==1?"s":""} · {repairList.length} repair note{repairList.length!==1?"s":""} · {generalNotes.length} general note{generalNotes.length!==1?"s":""}
+          </div>
+        </div>
+        <button onClick={onDismiss} style={{ padding:"6px 14px",background:"rgba(148,163,184,0.1)",border:"1px solid rgba(148,163,184,0.25)",borderRadius:10,color:"#94a3b8",fontSize:12,cursor:"pointer" }}>✕ Close</button>
+      </div>
+
+      {results._photo && (
+        <img src={results._photo} alt="journal" style={{ width:"100%",maxHeight:120,objectFit:"cover",borderRadius:10,marginBottom:14,opacity:0.7 }} />
+      )}
+
+      {/* Tabs */}
+      <div style={{ display:"flex",gap:8,marginBottom:16,flexWrap:"wrap" }}>
+        <button style={tabStyle("machines")} onClick={()=>setActiveTab("machines")}>🏭 Machines ({machineList.length})</button>
+        <button style={tabStyle("repairs")}  onClick={()=>setActiveTab("repairs")}>🔧 Repairs ({repairList.length})</button>
+        <button style={tabStyle("notes")}    onClick={()=>setActiveTab("notes")}>📝 Notes</button>
+        <button style={tabStyle("raw")}      onClick={()=>setActiveTab("raw")}>📜 Raw Text</button>
+      </div>
+
+      {/* MACHINES */}
+      {activeTab==="machines" && (
+        <div style={{ display:"flex",flexDirection:"column",gap:10 }}>
+          {machineList.length===0 && <div style={{ color:"#94a3b8",fontSize:13,padding:12 }}>No machines detected in this page.</div>}
+          {machineList.map((m, idx) => {
+            const added = addedIds.has(idx);
+            const existingMatch = machines.find(x =>
+              (m.name && x.name?.toLowerCase().includes(m.name.toLowerCase())) ||
+              (m.serialNumber && x.serialNumber === m.serialNumber)
+            );
+            return (
+              <div key={idx} style={{ background:added?"rgba(16,185,129,0.08)":"rgba(255,255,255,0.7)",border:`1.5px solid ${added?"rgba(16,185,129,0.3)":"rgba(124,58,237,0.15)"}`,borderRadius:14,padding:"12px 14px",opacity:added?0.7:1 }}>
+                <div style={{ display:"flex",justifyContent:"space-between",alignItems:"flex-start",gap:10,flexWrap:"wrap" }}>
+                  <div style={{ flex:1,minWidth:0 }}>
+                    <div style={{ fontWeight:800,fontSize:14,color:"#1e1b4b",marginBottom:4 }}>
+                      {m.suggestedName || m.name || "Unnamed Machine"}
+                    </div>
+                    {existingMatch && !added && (
+                      <div style={{ fontSize:10,color:"#f59e0b",fontWeight:700,marginBottom:4 }}>⚠️ Possibly matches "{existingMatch.name}" already in DB</div>
+                    )}
+                    <div style={{ display:"grid",gridTemplateColumns:"repeat(2,1fr)",gap:4 }}>
+                      {[["Make",m.make],["Model",m.model],["Serial",m.serialNumber],["Location",m.location],["Voltage",m.voltage],["HP",m.horsepower],["Category",m.category],["PM Every",m.pmIntervalDays?m.pmIntervalDays+"d":null]].filter(([,v])=>v).map(([k,v])=>(
+                        <div key={k} style={{ background:"rgba(124,58,237,0.04)",borderRadius:6,padding:"4px 8px" }}>
+                          <div style={{ fontSize:9,color:"#94a3b8",fontWeight:600 }}>{k}</div>
+                          <div style={{ fontSize:11,color:"#1e1b4b",fontWeight:600 }}>{v}</div>
+                        </div>
+                      ))}
+                    </div>
+                    {m.notes && <div style={{ fontSize:11,color:"#64748b",marginTop:6,fontStyle:"italic" }}>"{m.notes}"</div>}
+                  </div>
+                  <div style={{ flexShrink:0 }}>
+                    {added
+                      ? <span style={{ fontSize:11,fontWeight:700,color:"#10b981" }}>✅ Added</span>
+                      : <button onClick={()=>addMachine(m,idx)} style={{ padding:"8px 16px",background:"linear-gradient(135deg,#7c3aed,#a855f7)",border:"none",borderRadius:10,color:"#fff",fontWeight:800,fontSize:12,cursor:"pointer" }}>+ Add</button>
+                    }
+                  </div>
+                </div>
+              </div>
+            );
+          })}
+          {machineList.length > 0 && addedIds.size < machineList.length && (
+            <button
+              onClick={()=>machineList.forEach((_,i)=>{ if(!addedIds.has(i)) addMachine(machineList[i],i); })}
+              style={{ padding:"11px 0",background:"rgba(124,58,237,0.1)",border:"1.5px solid rgba(124,58,237,0.3)",borderRadius:12,color:"#7c3aed",fontWeight:800,fontSize:13,cursor:"pointer",width:"100%" }}
+            >
+              ➕ Add All {machineList.length - addedIds.size} Machines
+            </button>
+          )}
+        </div>
+      )}
+
+      {/* REPAIRS */}
+      {activeTab==="repairs" && (
+        <div style={{ display:"flex",flexDirection:"column",gap:8 }}>
+          {repairList.length===0 && <div style={{ color:"#94a3b8",fontSize:13,padding:12 }}>No repair notes detected.</div>}
+          {repairList.map((r,i)=>(
+            <div key={i} style={{ background:"rgba(248,113,113,0.06)",border:"1px solid rgba(248,113,113,0.2)",borderRadius:12,padding:"12px 14px" }}>
+              <div style={{ fontWeight:700,fontSize:13,color:"#1e1b4b",marginBottom:4 }}>{r.equipment || "Unknown Equipment"}</div>
+              {r.date && <div style={{ fontSize:10,color:"#94a3b8",marginBottom:6 }}>📅 {r.date}</div>}
+              {r.issue  && <div style={{ fontSize:12,color:"#f87171",marginBottom:2 }}>🔴 Issue: {r.issue}</div>}
+              {r.action && <div style={{ fontSize:12,color:"#10b981",marginBottom:2 }}>✅ Action: {r.action}</div>}
+              {r.parts  && <div style={{ fontSize:12,color:"#64748b" }}>🔩 Parts: {r.parts}</div>}
+            </div>
+          ))}
+        </div>
+      )}
+
+      {/* GENERAL NOTES */}
+      {activeTab==="notes" && (
+        <div style={{ display:"flex",flexDirection:"column",gap:8 }}>
+          {generalNotes.length===0 && <div style={{ color:"#94a3b8",fontSize:13,padding:12 }}>No general notes detected.</div>}
+          {generalNotes.map((n,i)=>(
+            <div key={i} style={{ background:"rgba(255,255,255,0.7)",border:"1px solid rgba(124,58,237,0.12)",borderRadius:10,padding:"10px 14px",fontSize:13,color:"#1e1b4b" }}>{n}</div>
+          ))}
+        </div>
+      )}
+
+      {/* RAW TEXT */}
+      {activeTab==="raw" && (
+        <div style={{ background:"rgba(30,27,75,0.04)",border:"1px solid rgba(124,58,237,0.12)",borderRadius:12,padding:14 }}>
+          <div style={{ fontSize:10,color:"#94a3b8",fontWeight:700,letterSpacing:1,textTransform:"uppercase",marginBottom:8 }}>Raw Transcription</div>
+          <pre style={{ fontSize:11,color:"#1e1b4b",lineHeight:1.7,whiteSpace:"pre-wrap",fontFamily:"inherit",margin:0 }}>
+            {rawText || "No text transcribed."}
+          </pre>
+        </div>
+      )}
+    </div>
+  );
+}
+
 
 function MachineCard({ machine: m, onEdit, onDelete }) {
   const [expanded, setExpanded] = useState(false);
