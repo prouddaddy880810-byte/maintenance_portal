@@ -2,6 +2,7 @@ import { useState, useEffect, useRef, useCallback } from "react";
 
 // ─── CONSTANTS ───────────────────────────────────────────────────────────────
 const TODAY = new Date().toISOString().split("T")[0];
+const DATA_VERSION = "v2-journal-2026-06-29"; // bump this to trigger migration prompt
 
 const CAT_COLOR = { Filter:"#7c3aed", Equipment:"#38bdf8", Electrical:"#f87171", Asset:"#f59e0b", Safety:"#34d399", Machine:"#a855f7" };
 const CAT_ICON  = { Filter:"⚙", Equipment:"⬡", Electrical:"⚡", Asset:"◎", Safety:"⬟", Machine:"🏭" };
@@ -2306,6 +2307,9 @@ export default function App() {
   const [logNote,    setNote]       = useState("");
   const [logDate,    setDate]       = useState(TODAY);
   const [toast,      setToast]      = useState(null);
+  const [showMigration, setShowMigration] = useState(() => {
+    return localStorage.getItem("cbv3_dataVersion") !== DATA_VERSION;
+  });
   const [showHidden, setShowHidden] = useState(false);
   const [addForm,    setForm]       = useState({ name:"",location:"",category:"Filter",detail:"",intervalDays:30,pmEnabled:true });
   const [watchItems, setWatchItems]   = useState(() => load("cbv3_watchItems", INITIAL_WATCH_ITEMS));
@@ -2321,6 +2325,28 @@ export default function App() {
   useEffect(() => { save("cbv3_assetPhotos", assetPhotos); }, [assetPhotos]);
 
   function showToast(m) { setToast(m); setTimeout(()=>setToast(null), 2800); }
+
+  function doMigrate() {
+    setMachines(INITIAL_MACHINES);
+    setWatchItems(prev => {
+      // Merge: keep any user-added watch items (id > 9006), prepend journal ones
+      const userAdded = prev.filter(w => w.id > 9006);
+      return [...INITIAL_WATCH_ITEMS, ...userAdded];
+    });
+    setWorkEntries(prev => {
+      // Merge: keep any user entries (id > 8013), prepend journal ones
+      const userAdded = prev.filter(e => e.id > 8013);
+      return [...INITIAL_WORK_ENTRIES, ...userAdded];
+    });
+    localStorage.setItem("cbv3_dataVersion", DATA_VERSION);
+    setShowMigration(false);
+    showToast("✅ Journal data loaded — 20 machines, 6 watch items, 13 log entries");
+  }
+
+  function skipMigration() {
+    localStorage.setItem("cbv3_dataVersion", DATA_VERSION);
+    setShowMigration(false);
+  }
 
   function doLog() {
     const newLog = { id:Date.now(), assetId:logModal.id, date:logDate, note:logNote, tech:"CB" };
@@ -2377,6 +2403,74 @@ export default function App() {
       <div style={S.blob1} /><div style={S.blob2} /><div style={S.blob3} />
 
       {toast && <div style={S.toast}>{toast}</div>}
+
+      {/* JOURNAL DATA MIGRATION BANNER */}
+      {showMigration && (
+        <div style={{
+          position:"fixed", inset:0, background:"rgba(30,27,75,0.55)",
+          backdropFilter:"blur(16px)", WebkitBackdropFilter:"blur(16px)",
+          display:"flex", alignItems:"center", justifyContent:"center",
+          zIndex:200, padding:20
+        }}>
+          <div style={{
+            background:"rgba(255,255,255,0.97)", borderRadius:28,
+            padding:32, maxWidth:440, width:"100%",
+            boxShadow:"0 32px 80px rgba(124,58,237,0.25), inset 0 1px 0 #fff",
+            border:"1.5px solid rgba(124,58,237,0.15)"
+          }}>
+            <div style={{ fontSize:36, marginBottom:12, textAlign:"center" }}>📓</div>
+            <div style={{ fontWeight:900, fontSize:20, color:"#1e1b4b", marginBottom:6, textAlign:"center" }}>
+              Journal Data Ready to Load
+            </div>
+            <div style={{ fontSize:13, color:"#64748b", marginBottom:20, textAlign:"center", lineHeight:1.6 }}>
+              Your 10 journal pages have been parsed and are ready to import into the app.
+            </div>
+
+            <div style={{ display:"flex", flexDirection:"column", gap:8, marginBottom:24 }}>
+              {[
+                ["🏭", "20 machines", "Forklifts, lasers, compressors, carts & more"],
+                ["👁", "6 watch list items", "Clark #36 hose, Hyster #34 seals, urinal & more"],
+                ["📋", "13 work log entries", "All repair notes from March 18–30"],
+              ].map(([icon, label, sub]) => (
+                <div key={label} style={{
+                  display:"flex", gap:12, alignItems:"center",
+                  background:"rgba(124,58,237,0.05)", borderRadius:12, padding:"10px 14px",
+                  border:"1px solid rgba(124,58,237,0.1)"
+                }}>
+                  <span style={{ fontSize:22, flexShrink:0 }}>{icon}</span>
+                  <div>
+                    <div style={{ fontWeight:800, fontSize:14, color:"#1e1b4b" }}>{label}</div>
+                    <div style={{ fontSize:11, color:"#94a3b8" }}>{sub}</div>
+                  </div>
+                </div>
+              ))}
+            </div>
+
+            <div style={{ fontSize:11, color:"#f59e0b", background:"rgba(245,158,11,0.08)", border:"1px solid rgba(245,158,11,0.2)", borderRadius:10, padding:"10px 14px", marginBottom:20, lineHeight:1.5 }}>
+              ⚠️ Your existing assets and PM logs are safe — this only loads machines, watch items, and work log entries. Your existing ones are kept.
+            </div>
+
+            <div style={{ display:"flex", gap:10 }}>
+              <button onClick={skipMigration} style={{
+                flex:1, padding:"12px 0", background:"rgba(255,255,255,0.6)",
+                border:"1px solid rgba(148,163,184,0.3)", borderRadius:14,
+                color:"#94a3b8", fontWeight:700, fontSize:13, cursor:"pointer", fontFamily:"inherit"
+              }}>
+                Skip for now
+              </button>
+              <button onClick={doMigrate} style={{
+                flex:2, padding:"12px 0",
+                background:"linear-gradient(135deg,#7c3aed,#a855f7)",
+                border:"none", borderRadius:14, color:"#fff",
+                fontWeight:900, fontSize:14, cursor:"pointer", fontFamily:"inherit",
+                boxShadow:"0 4px 20px rgba(124,58,237,0.4)"
+              }}>
+                ✅ Load Journal Data
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* EDIT ASSET MODAL */}
       {editAsset && (
