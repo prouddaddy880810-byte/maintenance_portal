@@ -237,9 +237,9 @@ function Badge({ label, color }) {
   return <span style={{ background:c+"20", color:c, border:`1px solid ${c}40`, borderRadius:4, padding:"2px 8px", fontSize:10, fontWeight:700, letterSpacing:0.5 }}>{label}</span>;
 }
 
-function Pill({ n, label, color }) {
+function Pill({ n, label, color, onClick }) {
   return (
-    <div style={{ display:"flex",alignItems:"center",gap:5,background:color+"15",border:`1px solid ${color}30`,borderRadius:20,padding:"4px 12px" }}>
+    <div onClick={onClick} style={{ display:"flex",alignItems:"center",gap:5,background:color+"15",border:`1px solid ${color}30`,borderRadius:20,padding:"4px 12px",cursor:onClick?"pointer":"default" }}>
       <span style={{ color,fontWeight:800,fontSize:14 }}>{n}</span>
       <span style={{ color,fontSize:9,letterSpacing:1,fontWeight:600,textTransform:"uppercase" }}>{label}</span>
     </div>
@@ -328,9 +328,10 @@ function ConfirmDelete({ name, onConfirm, onClose }) {
 }
 
 // ─── ASSET CARD ──────────────────────────────────────────────────────────────
-function AssetCard({ asset, onLog, onPMTask, onHistory, onEdit, onDismiss, onDelete, dismissed }) {
+function AssetCard({ asset, onLog, onPMTask, onHistory, onEdit, onDismiss, onDelete, dismissed, photos, onAddPhoto, onAddWatch }) {
   const { pm } = asset;
   const [confirmingDelete, setConfirmingDelete] = useState(false);
+  const cardPhotos = photos || [];
   return (
     <>
       {confirmingDelete && (
@@ -351,6 +352,21 @@ function AssetCard({ asset, onLog, onPMTask, onHistory, onEdit, onDismiss, onDel
         <div style={{ fontWeight:800,fontSize:15,color:"#1e1b4b",lineHeight:1.2,marginTop:2 }}>{asset.name}</div>
         <div style={{ fontSize:11,color:"#94a3b8" }}>{asset.location}</div>
         <div style={{ fontSize:12,color:"#64748b" }}>{asset.detail}</div>
+
+        {/* Photo strip */}
+        {cardPhotos.length > 0 && (
+          <div style={{ display:"flex",gap:5,overflowX:"auto",paddingBottom:2,marginTop:2 }}>
+            {cardPhotos.slice(0,4).map((p,i)=>(
+              <div key={i} style={{ position:"relative",flexShrink:0 }}>
+                <img src={p.url} alt={p.label||`photo ${i+1}`} style={{ width:52,height:52,objectFit:"cover",borderRadius:8,border:"1.5px solid rgba(124,58,237,0.15)" }} />
+                {cardPhotos.length>4 && i===3 && (
+                  <div style={{ position:"absolute",inset:0,background:"rgba(30,27,75,0.55)",borderRadius:8,display:"flex",alignItems:"center",justifyContent:"center",color:"#fff",fontSize:12,fontWeight:800 }}>+{cardPhotos.length-3}</div>
+                )}
+              </div>
+            ))}
+          </div>
+        )}
+
         {!dismissed && asset.pmEnabled && (
           <div style={{ display:"flex",justifyContent:"space-between",marginTop:4 }}>
             <span style={{ fontSize:10,color:"#cbd5e1" }}>Every {asset.intervalDays}d</span>
@@ -367,9 +383,11 @@ function AssetCard({ asset, onLog, onPMTask, onHistory, onEdit, onDismiss, onDel
           }
           <button onClick={()=>setConfirmingDelete(true)} style={{ ...S.cGhost,color:"#f87171",borderColor:"#f8717130" }}>🗑 Delete</button>
           {!dismissed && (
-    <div style={{ display:"flex", gap:8, flexWrap:"wrap" }}>
+    <div style={{ display:"flex", gap:8, flexWrap:"wrap", width:"100%" }}>
       <button onClick={onPMTask} style={{ ...S.cPrimary, fontSize:11, padding:"8px 12px" }}>🔩 PM Tasks</button>
       <button onClick={onLog} style={{ ...S.cPrimary, background:"rgba(124,58,237,0.08)", color:"#7c3aed", border:"1.5px solid rgba(124,58,237,0.25)", fontSize:11, padding:"8px 12px" }}>📋 Quick Log</button>
+      <button onClick={onAddPhoto} style={{ ...S.cGhost, color:"#a855f7", borderColor:"rgba(168,85,247,0.3)", fontSize:11, padding:"6px 10px" }}>📷 {cardPhotos.length>0?`Photos (${cardPhotos.length})`:"Add Photo"}</button>
+      <button onClick={onAddWatch} style={{ ...S.cGhost, color:"#f59e0b", borderColor:"rgba(245,158,11,0.35)", fontSize:11, padding:"6px 10px" }}>👁 Watch</button>
     </div>
   )}
         </div>
@@ -1411,13 +1429,17 @@ export default function App() {
   const [toast,      setToast]      = useState(null);
   const [showHidden, setShowHidden] = useState(false);
   const [addForm,    setForm]       = useState({ name:"",location:"",category:"Filter",detail:"",intervalDays:30,pmEnabled:true });
-  const [repairModal, setRepairModal] = useState(false);
+  const [watchItems, setWatchItems]   = useState(() => load("cbv3_watchItems", []));
+  const [assetPhotos, setAssetPhotos] = useState(() => load("cbv3_assetPhotos", {}));
+  const [watchModal, setWatchModal]   = useState(null); // asset to add to watch list
+  const [photoModal, setPhotoModal]   = useState(null); // asset to add photos to
 
   useEffect(() => { save("cbv3_assets",    assets);    }, [assets]);
   useEffect(() => { save("cbv3_logs",      logs);      }, [logs]);
   useEffect(() => { save("cbv3_machines",  machines);  }, [machines]);
   useEffect(() => { save("cbv3_gaugeLogs", gaugeLogs); }, [gaugeLogs]);
-  useEffect(() => { save("cbv3_workEntries", workEntries); }, [workEntries]);
+  useEffect(() => { save("cbv3_watchItems",  watchItems);  }, [watchItems]);
+  useEffect(() => { save("cbv3_assetPhotos", assetPhotos); }, [assetPhotos]);
 
   function showToast(m) { setToast(m); setTimeout(()=>setToast(null), 2800); }
 
@@ -1461,6 +1483,7 @@ export default function App() {
 
   const TABS = [
     ["dashboard",  "Dashboard"],
+    ["watchlist",  "👁 Watch List"],
     ["map",        "🗺 Facility Map"],
     ["machines",   "🏭 Machines"],
     ["gauge",      "⚡ Gauge Log"],
@@ -1584,6 +1607,42 @@ export default function App() {
         />
       )}
 
+      {/* ASSET PHOTO MODAL */}
+      {photoModal && (
+        <AssetPhotoModal
+          asset={photoModal}
+          photos={assetPhotos[photoModal.id] || []}
+          onAdd={(photo) => {
+            setAssetPhotos(prev => ({
+              ...prev,
+              [photoModal.id]: [...(prev[photoModal.id] || []), photo]
+            }));
+            showToast(`📷 Photo added to ${photoModal.name}`);
+          }}
+          onDelete={(idx) => {
+            setAssetPhotos(prev => ({
+              ...prev,
+              [photoModal.id]: (prev[photoModal.id] || []).filter((_,i)=>i!==idx)
+            }));
+            showToast("🗑 Photo removed");
+          }}
+          onClose={()=>setPhotoModal(null)}
+        />
+      )}
+
+      {/* ADD TO WATCH LIST MODAL */}
+      {watchModal && (
+        <AddWatchModal
+          asset={watchModal}
+          onConfirm={(item) => {
+            setWatchItems(prev => [item, ...prev]);
+            showToast(`👁 Added to Watch List`);
+            setWatchModal(null);
+          }}
+          onClose={()=>setWatchModal(null)}
+        />
+      )}
+
       {/* HEADER */}
       <header style={S.header}>
         <div style={S.hInner}>
@@ -1597,6 +1656,7 @@ export default function App() {
           <div style={S.statRow}>
             <Pill n={overdue.length}  label="Overdue"  color="#f87171" />
             <Pill n={dueSoon.length}  label="Due Soon" color="#f59e0b" />
+            <Pill n={watchItems.filter(w=>!w.resolved).length} label="Watch" color="#f59e0b" onClick={()=>setTab("watchlist")} />
             <Pill n={machines.length} label="Machines" color="#a855f7" />
           </div>
         </div>
@@ -1643,15 +1703,28 @@ export default function App() {
               {displayed.map(a=>(
                 <AssetCard key={a.id} asset={a}
                   dismissed={!!a.dismissed}
+                  photos={assetPhotos[a.id] || []}
                   onLog={()=>setLog(a)}
                   onPMTask={()=>setPMTask(a)}
                   onHistory={()=>setHist(a)}
                   onEdit={()=>setEditAsset(a)}
                   onDismiss={()=>dismissAsset(a.id)}
-                  onDelete={()=>deleteAsset(a.id)} />
+                  onDelete={()=>deleteAsset(a.id)}
+                  onAddPhoto={()=>setPhotoModal(a)}
+                  onAddWatch={()=>setWatchModal(a)} />
               ))}
             </div>
           </>
+        )}
+
+        {/* WATCH LIST TAB */}
+        {tab==="watchlist" && (
+          <WatchList
+            watchItems={watchItems}
+            setWatchItems={setWatchItems}
+            assets={assets}
+            showToast={showToast}
+          />
         )}
 
         {/* MACHINES TAB */}
@@ -1706,6 +1779,318 @@ export default function App() {
           </div>
         )}
       </main>
+    </div>
+  );
+}
+
+// ─── ASSET PHOTO MODAL ───────────────────────────────────────────────────────
+function AssetPhotoModal({ asset, photos, onAdd, onDelete, onClose }) {
+  const [label, setLabel] = useState("");
+  const [preview, setPreview] = useState(null);
+
+  function handleCapture(base64, dataUrl) {
+    setPreview({ url: dataUrl, base64, label: label.trim() || "Photo" });
+  }
+
+  function confirmAdd() {
+    if (!preview) return;
+    onAdd({ url: preview.url, label: preview.label, addedAt: new Date().toISOString() });
+    setPreview(null);
+    setLabel("");
+  }
+
+  return (
+    <Overlay onClose={onClose}>
+      <div style={{ fontSize:10,letterSpacing:2,fontWeight:700,textTransform:"uppercase",color:"#a855f7",marginBottom:6 }}>📷 Photos</div>
+      <div style={S.mTitle}>{asset.name}</div>
+      <div style={{ fontSize:12,color:"#94a3b8",marginBottom:18 }}>{asset.location}</div>
+
+      {/* Existing photos */}
+      {photos.length > 0 && (
+        <div style={{ marginBottom:20 }}>
+          <div style={{ fontSize:11,color:"#94a3b8",fontWeight:700,letterSpacing:1,textTransform:"uppercase",marginBottom:10 }}>On File — {photos.length} photo{photos.length!==1?"s":""}</div>
+          <div style={{ display:"flex",flexDirection:"column",gap:8 }}>
+            {photos.map((p,i)=>(
+              <div key={i} style={{ display:"flex",gap:12,alignItems:"center",background:"rgba(168,85,247,0.05)",border:"1px solid rgba(168,85,247,0.15)",borderRadius:12,padding:"8px 12px" }}>
+                <img src={p.url} alt={p.label} style={{ width:56,height:56,objectFit:"cover",borderRadius:8,flexShrink:0 }} />
+                <div style={{ flex:1,minWidth:0 }}>
+                  <div style={{ fontWeight:700,fontSize:13,color:"#1e1b4b" }}>{p.label}</div>
+                  <div style={{ fontSize:10,color:"#94a3b8" }}>{new Date(p.addedAt).toLocaleDateString()}</div>
+                </div>
+                <button onClick={()=>onDelete(i)} style={{ padding:"4px 10px",background:"rgba(248,113,113,0.1)",border:"1px solid rgba(248,113,113,0.3)",borderRadius:8,color:"#f87171",fontSize:11,cursor:"pointer" }}>🗑</button>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* Add new photo */}
+      <div style={{ background:"rgba(168,85,247,0.05)",border:"1.5px dashed rgba(168,85,247,0.3)",borderRadius:16,padding:16,marginBottom:12 }}>
+        <div style={{ fontSize:11,color:"#94a3b8",fontWeight:700,letterSpacing:1,textTransform:"uppercase",marginBottom:12 }}>Add New Photo</div>
+        <input
+          value={label}
+          onChange={e=>setLabel(e.target.value)}
+          placeholder='Label (e.g. "Oil leak — bottom left")'
+          style={{ ...S.inp, marginBottom:12, fontSize:13 }}
+        />
+        {preview ? (
+          <div>
+            <img src={preview.url} alt="preview" style={{ width:"100%",maxHeight:140,objectFit:"cover",borderRadius:10,marginBottom:10 }} />
+            <div style={{ fontSize:12,color:"#7c3aed",fontWeight:600,marginBottom:10 }}>"{preview.label}"</div>
+            <div style={{ display:"flex",gap:8 }}>
+              <button onClick={()=>setPreview(null)} style={S.btnG}>Retake</button>
+              <button onClick={confirmAdd} style={S.btnP}>✅ Save Photo</button>
+            </div>
+          </div>
+        ) : (
+          <PhotoCapture onCapture={handleCapture} label="📷 Take / Choose Photo" />
+        )}
+      </div>
+
+      <button onClick={onClose} style={{ ...S.btnG, width:"100%", marginTop:4 }}>Done</button>
+    </Overlay>
+  );
+}
+
+// ─── ADD TO WATCH LIST MODAL ─────────────────────────────────────────────────
+const WATCH_PRIORITY = [
+  { key:"low",    label:"👀 Keep an Eye On",   color:"#10b981", desc:"Not urgent — note it for slow days" },
+  { key:"medium", label:"⚠️ Getting Worse",     color:"#f59e0b", desc:"Trending bad — check soon" },
+  { key:"high",   label:"🔴 Needs Fixing Soon", color:"#f87171", desc:"Will fail — schedule before it does" },
+];
+
+function AddWatchModal({ asset, onConfirm, onClose }) {
+  const [priority, setPriority] = useState("low");
+  const [note, setNote] = useState("");
+  const [photoUrl, setPhotoUrl] = useState(null);
+
+  function confirm() {
+    if (!note.trim()) return;
+    onConfirm({
+      id: Date.now(),
+      assetId: asset.id,
+      assetName: asset.name,
+      assetLocation: asset.location,
+      assetCategory: asset.category,
+      priority,
+      note: note.trim(),
+      photoUrl,
+      addedAt: new Date().toISOString(),
+      resolved: false,
+    });
+  }
+
+  const pObj = WATCH_PRIORITY.find(p=>p.key===priority);
+
+  return (
+    <Overlay onClose={onClose}>
+      <div style={{ fontSize:10,letterSpacing:2,fontWeight:700,textTransform:"uppercase",color:"#f59e0b",marginBottom:6 }}>👁 Watch List</div>
+      <div style={S.mTitle}>{asset.name}</div>
+      <div style={{ fontSize:12,color:"#94a3b8",marginBottom:20 }}>{asset.location} · {asset.category}</div>
+
+      <div style={{ fontSize:11,color:"#94a3b8",fontWeight:700,letterSpacing:1,textTransform:"uppercase",marginBottom:10 }}>How bad is it?</div>
+      <div style={{ display:"flex",flexDirection:"column",gap:8,marginBottom:18 }}>
+        {WATCH_PRIORITY.map(p=>(
+          <button key={p.key} onClick={()=>setPriority(p.key)} style={{
+            textAlign:"left", padding:"12px 16px", borderRadius:14,
+            background: priority===p.key ? p.color+"18" : "rgba(255,255,255,0.5)",
+            border: `2px solid ${priority===p.key ? p.color : "rgba(124,58,237,0.1)"}`,
+            cursor:"pointer", fontFamily:"inherit",
+          }}>
+            <div style={{ fontWeight:700, fontSize:13, color: priority===p.key ? p.color : "#1e1b4b" }}>{p.label}</div>
+            <div style={{ fontSize:11, color:"#94a3b8", marginTop:2 }}>{p.desc}</div>
+          </button>
+        ))}
+      </div>
+
+      <div style={{ fontSize:11,color:"#94a3b8",fontWeight:700,letterSpacing:1,textTransform:"uppercase",marginBottom:8 }}>What did you see?</div>
+      <textarea
+        value={note}
+        onChange={e=>setNote(e.target.value)}
+        placeholder={`e.g. "Bearing making a faint squeal at startup — not bad yet but worth watching. Check lube next PM."`}
+        rows={3}
+        style={{ ...S.inp, resize:"none", fontSize:13, marginBottom:14 }}
+      />
+
+      {photoUrl
+        ? <div style={{ marginBottom:14, position:"relative" }}>
+            <img src={photoUrl} alt="watch" style={{ width:"100%",maxHeight:110,objectFit:"cover",borderRadius:10 }} />
+            <button onClick={()=>setPhotoUrl(null)} style={{ position:"absolute",top:6,right:6,background:"rgba(0,0,0,0.6)",border:"none",color:"#fff",borderRadius:8,padding:"3px 8px",fontSize:11,cursor:"pointer" }}>✕</button>
+          </div>
+        : <div style={{ marginBottom:14 }}><PhotoCapture onCapture={(_,url)=>setPhotoUrl(url)} label="📷 Add Photo (optional)" /></div>
+      }
+
+      <div style={S.mRow}>
+        <button onClick={onClose} style={S.btnG}>Cancel</button>
+        <button onClick={confirm} disabled={!note.trim()} style={{ ...S.btnP, opacity:note.trim()?1:0.5 }}>
+          👁 Add to Watch List
+        </button>
+      </div>
+    </Overlay>
+  );
+}
+
+// ─── WATCH LIST TAB ──────────────────────────────────────────────────────────
+function WatchList({ watchItems, setWatchItems, assets, showToast }) {
+  const [filter, setFilter] = useState("active"); // "active" | "all" | "slow"
+  const [expandId, setExpandId] = useState(null);
+
+  const active   = watchItems.filter(w=>!w.resolved);
+  const resolved = watchItems.filter(w=>w.resolved);
+
+  const PRIORITY_ORDER = { high:0, medium:1, low:2 };
+
+  const displayed = filter==="slow"
+    ? active.filter(w=>w.priority==="low").sort((a,b)=>new Date(b.addedAt)-new Date(a.addedAt))
+    : filter==="active"
+    ? [...active].sort((a,b)=>PRIORITY_ORDER[a.priority]-PRIORITY_ORDER[b.priority])
+    : [...watchItems].sort((a,b)=>PRIORITY_ORDER[a.priority]-PRIORITY_ORDER[b.priority] || (a.resolved?1:-1));
+
+  function toggleResolve(id) {
+    setWatchItems(prev=>prev.map(w=>w.id===id?{...w,resolved:!w.resolved,resolvedAt:w.resolved?null:new Date().toISOString()}:w));
+    showToast(watchItems.find(w=>w.id===id)?.resolved ? "↩ Re-opened" : "✅ Marked fixed");
+  }
+
+  function deleteItem(id) {
+    setWatchItems(prev=>prev.filter(w=>w.id!==id));
+    showToast("🗑 Removed");
+  }
+
+  const pColor = { low:"#10b981", medium:"#f59e0b", high:"#f87171" };
+  const pLabel = { low:"👀 Keep Eye On", medium:"⚠️ Getting Worse", high:"🔴 Fix Soon" };
+
+  return (
+    <div>
+      {/* Header + Slow Day CTA */}
+      <div style={{ background:"linear-gradient(135deg,rgba(245,158,11,0.08),rgba(245,158,11,0.04))",border:"1.5px solid rgba(245,158,11,0.2)",borderRadius:20,padding:"18px 20px",marginBottom:20 }}>
+        <div style={{ display:"flex",justifyContent:"space-between",alignItems:"flex-start",flexWrap:"wrap",gap:12 }}>
+          <div>
+            <div style={{ fontWeight:800,fontSize:18,color:"#1e1b4b" }}>👁 Watch List</div>
+            <div style={{ fontSize:12,color:"#94a3b8",marginTop:2 }}>Things you see but aren't broken yet</div>
+          </div>
+          <div style={{ display:"flex",gap:8,alignItems:"center",flexWrap:"wrap" }}>
+            <div style={{ background:"rgba(248,113,113,0.12)",border:"1px solid rgba(248,113,113,0.25)",borderRadius:12,padding:"6px 14px",textAlign:"center" }}>
+              <div style={{ fontWeight:800,fontSize:18,color:"#f87171" }}>{active.filter(w=>w.priority==="high").length}</div>
+              <div style={{ fontSize:9,color:"#f87171",letterSpacing:1,fontWeight:600 }}>FIX SOON</div>
+            </div>
+            <div style={{ background:"rgba(245,158,11,0.12)",border:"1px solid rgba(245,158,11,0.25)",borderRadius:12,padding:"6px 14px",textAlign:"center" }}>
+              <div style={{ fontWeight:800,fontSize:18,color:"#f59e0b" }}>{active.filter(w=>w.priority==="medium").length}</div>
+              <div style={{ fontSize:9,color:"#f59e0b",letterSpacing:1,fontWeight:600 }}>WATCH</div>
+            </div>
+            <div style={{ background:"rgba(16,185,129,0.1)",border:"1px solid rgba(16,185,129,0.2)",borderRadius:12,padding:"6px 14px",textAlign:"center" }}>
+              <div style={{ fontWeight:800,fontSize:18,color:"#10b981" }}>{active.filter(w=>w.priority==="low").length}</div>
+              <div style={{ fontSize:9,color:"#10b981",letterSpacing:1,fontWeight:600 }}>EYE ON</div>
+            </div>
+          </div>
+        </div>
+
+        {/* Slow Day Button */}
+        <button onClick={()=>setFilter(f=>f==="slow"?"active":"slow")} style={{
+          marginTop:14, width:"100%", padding:"13px 0",
+          background: filter==="slow" ? "rgba(16,185,129,0.15)" : "rgba(255,255,255,0.7)",
+          border: `2px solid ${filter==="slow" ? "#10b981" : "rgba(245,158,11,0.25)"}`,
+          borderRadius:14, cursor:"pointer", fontFamily:"inherit",
+          color: filter==="slow" ? "#10b981" : "#f59e0b",
+          fontWeight:800, fontSize:14, transition:"all 0.2s",
+        }}>
+          {filter==="slow" ? "✅ Showing Slow Day Tasks" : "🛋️ Slow Day? Show Me What To Tackle"}
+        </button>
+        {filter==="slow" && active.filter(w=>w.priority==="low").length===0 && (
+          <div style={{ marginTop:10,textAlign:"center",fontSize:12,color:"#94a3b8" }}>Nothing in the "keep an eye on" bucket yet — add some from the dashboard.</div>
+        )}
+      </div>
+
+      {/* Filter tabs */}
+      <div style={{ display:"flex",gap:8,marginBottom:16,flexWrap:"wrap" }}>
+        {[["active",`Active (${active.length})`],["all",`All (${watchItems.length})`]].map(([k,l])=>(
+          <button key={k} onClick={()=>setFilter(k)} style={{
+            padding:"7px 16px",borderRadius:20,fontSize:12,fontWeight:600,
+            cursor:"pointer",fontFamily:"inherit",
+            background: filter===k?"rgba(245,158,11,0.12)":"rgba(255,255,255,0.6)",
+            border: `1px solid ${filter===k?"rgba(245,158,11,0.4)":"rgba(124,58,237,0.12)"}`,
+            color: filter===k?"#f59e0b":"#64748b",
+          }}>{l}</button>
+        ))}
+        {resolved.length>0 && (
+          <div style={{ marginLeft:"auto",fontSize:11,color:"#94a3b8",display:"flex",alignItems:"center",gap:4 }}>
+            ✅ {resolved.length} resolved
+          </div>
+        )}
+      </div>
+
+      {/* Items */}
+      {displayed.length===0 && filter!=="slow" && (
+        <div style={{ textAlign:"center",padding:"40px 20px",color:"#94a3b8" }}>
+          <div style={{ fontSize:32,marginBottom:12 }}>👁</div>
+          <div style={{ fontWeight:700,fontSize:15,color:"#1e1b4b",marginBottom:6 }}>Nothing on the Watch List yet</div>
+          <div style={{ fontSize:13 }}>Tap <strong style={{color:"#f59e0b"}}>👁 Watch</strong> on any asset card to add something that isn't broken all the way but you know it's coming.</div>
+        </div>
+      )}
+
+      <div style={{ display:"flex",flexDirection:"column",gap:12 }}>
+        {displayed.map(item=>{
+          const isExpanded = expandId===item.id;
+          const pc = pColor[item.priority];
+          return (
+            <div key={item.id} style={{
+              background: item.resolved ? "rgba(255,255,255,0.4)" : "rgba(255,255,255,0.72)",
+              border:`1.5px solid ${item.resolved?"rgba(148,163,184,0.2)":pc+"35"}`,
+              borderLeft:`4px solid ${item.resolved?"#cbd5e1":pc}`,
+              borderRadius:16, overflow:"hidden",
+              opacity: item.resolved ? 0.65 : 1,
+              backdropFilter:"blur(20px)",
+            }}>
+              {/* Card header — always visible */}
+              <div
+                onClick={()=>setExpandId(isExpanded?null:item.id)}
+                style={{ padding:"14px 16px",cursor:"pointer",display:"flex",gap:12,alignItems:"flex-start" }}
+              >
+                <div style={{ flex:1,minWidth:0 }}>
+                  <div style={{ display:"flex",gap:8,alignItems:"center",flexWrap:"wrap",marginBottom:4 }}>
+                    <span style={{ fontSize:10,fontWeight:800,letterSpacing:0.5,padding:"2px 9px",borderRadius:20,color:pc,background:pc+"18",border:`1px solid ${pc}30` }}>
+                      {pLabel[item.priority]}
+                    </span>
+                    {item.resolved && <span style={{ fontSize:10,fontWeight:700,color:"#10b981",background:"rgba(16,185,129,0.1)",padding:"2px 8px",borderRadius:20 }}>✅ Fixed</span>}
+                    <span style={{ fontSize:10,color:"#94a3b8" }}>{CAT_ICON[item.assetCategory]} {item.assetLocation}</span>
+                  </div>
+                  <div style={{ fontWeight:800,fontSize:14,color:"#1e1b4b",marginBottom:2 }}>{item.assetName}</div>
+                  <div style={{ fontSize:12,color:"#64748b",lineHeight:1.45 }}>
+                    {isExpanded ? item.note : (item.note.length>80 ? item.note.slice(0,80)+"…" : item.note)}
+                  </div>
+                  <div style={{ fontSize:10,color:"#cbd5e1",marginTop:4 }}>
+                    Added {new Date(item.addedAt).toLocaleDateString()}
+                    {item.resolvedAt && ` · Fixed ${new Date(item.resolvedAt).toLocaleDateString()}`}
+                  </div>
+                </div>
+                <span style={{ color:"#94a3b8",fontSize:14,flexShrink:0,marginTop:2 }}>{isExpanded?"▲":"▼"}</span>
+              </div>
+
+              {/* Expanded detail */}
+              {isExpanded && (
+                <div style={{ borderTop:"1px solid rgba(124,58,237,0.08)",padding:"12px 16px",background:"rgba(255,255,255,0.4)" }}>
+                  {item.photoUrl && (
+                    <img src={item.photoUrl} alt="watch" style={{ width:"100%",maxHeight:180,objectFit:"cover",borderRadius:10,marginBottom:12 }} />
+                  )}
+                  <div style={{ display:"flex",gap:8,flexWrap:"wrap" }}>
+                    <button
+                      onClick={()=>toggleResolve(item.id)}
+                      style={{ flex:2,padding:"10px 0",background:item.resolved?"rgba(245,158,11,0.1)":"rgba(16,185,129,0.1)",border:`1.5px solid ${item.resolved?"rgba(245,158,11,0.4)":"rgba(16,185,129,0.4)"}`,borderRadius:12,color:item.resolved?"#f59e0b":"#10b981",fontWeight:800,fontSize:12,cursor:"pointer",fontFamily:"inherit" }}
+                    >
+                      {item.resolved ? "↩ Re-open" : "✅ Mark Fixed"}
+                    </button>
+                    <button
+                      onClick={()=>deleteItem(item.id)}
+                      style={{ flex:1,padding:"10px 0",background:"rgba(248,113,113,0.08)",border:"1px solid rgba(248,113,113,0.25)",borderRadius:12,color:"#f87171",fontWeight:700,fontSize:12,cursor:"pointer",fontFamily:"inherit" }}
+                    >
+                      🗑 Delete
+                    </button>
+                  </div>
+                </div>
+              )}
+            </div>
+          );
+        })}
+      </div>
     </div>
   );
 }
