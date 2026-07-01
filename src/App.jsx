@@ -2317,6 +2317,7 @@ export default function App() {
   const [assetPhotos, setAssetPhotos] = useState(() => load("cbv3_assetPhotos", {}));
   const [watchModal, setWatchModal]   = useState(null); // asset to add to watch list
   const [photoModal, setPhotoModal]   = useState(null); // asset to add photos to
+  const [repairModal, setRepairModal] = useState(false); // repair modal open/closed
 
   useEffect(() => { save("cbv3_assets",    assets);    }, [assets]);
   useEffect(() => { save("cbv3_logs",      logs);      }, [logs]);
