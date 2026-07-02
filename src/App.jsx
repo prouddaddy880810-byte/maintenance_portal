@@ -728,25 +728,82 @@ Extract ALL information you can read and return ONLY valid JSON, no markdown:
 - pmIntervalDays: infer from equipment type if not stated
 Do your best even if handwriting is messy. Include partial data rather than skipping entries.`;
 
-// AI call with optional image (null base64 = text-only)
-async function aiCall(prompt, base64 = null) {
-  const content = [];
-  if (base64) content.push({ type:"image", source:{ type:"base64", media_type:"image/jpeg", data:base64 }});
-  content.push({ type:"text", text:prompt });
-  const resp = await fetch("https://api.anthropic.com/v1/messages", {
-    method:"POST",
-    headers:{
-      "Content-Type":"application/json",
-      "x-api-key": import.meta.env.VITE_ANTHROPIC_API_KEY || "",
-      "anthropic-version": "2023-06-01",
-      "anthropic-dangerous-direct-browser-access": "true"
-    },
-    body: JSON.stringify({ model:"claude-sonnet-4-6", max_tokens:2000, messages:[{ role:"user", content }]})
+// AI call with optional image — routed through /api/ai serverless proxy so the
+// API key never ships in the browser bundle. THROWS with a real error message
+// on failure instead of silently returning {} (that silence caused the
+// "parser doesn't work" black box).
+async function aiCall(prompt, base64 = null, opts = {}) {
+  let resp;
+  try {
+    resp = await fetch("/api/ai", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        prompt,
+        image: base64 ? { data: base64, mediaType: opts.mediaType || "image/jpeg" } : null,
+        useWebSearch: !!opts.useWebSearch,
+        maxTokens: opts.maxTokens,
+      }),
+    });
+  } catch (e) {
+    throw new Error("Network error reaching AI service — check connection");
+  }
+  let data = null;
+  try { data = await resp.json(); } catch { /* non-JSON (e.g. 404 page) */ }
+  if (!resp.ok || !data || typeof data.text !== "string") {
+    const msg = data?.error
+      || (resp.status === 404
+          ? "AI endpoint /api/ai not found — this only works on the Vercel deployment (or `vercel dev` locally)"
+          : `AI request failed (HTTP ${resp.status})`);
+    throw new Error(msg);
+  }
+  const text = data.text;
+  try { return JSON.parse(text.replace(/```json|```/g, "").trim()); }
+  catch {
+    const block = text.match(/\{[\s\S]*\}/);
+    if (block) { try { return JSON.parse(block[0]); } catch { /* fall through */ } }
+    throw new Error("AI responded but the output wasn't valid JSON — try again");
+  }
+}
+
+// Downscale + JPEG-compress a captured photo so it never blows the 5MB API
+// image limit (raw phone photos are 3–12MB; HEIC/PNG get normalized to JPEG).
+function compressImage(srcDataUrl, maxDim = 1568, quality = 0.85) {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    img.onload = () => {
+      try {
+        const scale = Math.min(1, maxDim / Math.max(img.width, img.height));
+        const c = document.createElement("canvas");
+        c.width = Math.max(1, Math.round(img.width * scale));
+        c.height = Math.max(1, Math.round(img.height * scale));
+        c.getContext("2d").drawImage(img, 0, 0, c.width, c.height);
+        const out = c.toDataURL("image/jpeg", quality);
+        resolve({ base64: out.split(",")[1], dataUrl: out });
+      } catch (e) { reject(new Error("Couldn't process image: " + e.message)); }
+    };
+    img.onerror = () => reject(new Error("Couldn't read that image format"));
+    img.src = srcDataUrl;
   });
-  const data = await resp.json();
-  const text = data.content?.find(b=>b.type==="text")?.text || "{}";
-  try { return JSON.parse(text.replace(/```json|```/g,"").trim()); }
-  catch { return null; }
+}
+
+// ─── DOCS ENGINE — manuals, SOP, troubleshooting per asset ──────────────────
+const DOCS_PROMPT = (make, model, serial, category) =>
+`You are an industrial maintenance documentation assistant. Equipment: ${make} ${model}${serial ? `, S/N ${serial}` : ""} (${category || "machine"}).
+Use web search to find the official user/service manual for this exact make and model. Then return ONLY valid JSON, no markdown:
+{"manualLinks":[{"title":null,"url":null}],"sop":[],"troubleshooting":[{"symptom":null,"likelyCause":null,"fix":null}],"safetyNotes":[],"summary":null}
+- manualLinks: up to 3 REAL urls found via search (manufacturer manuals, spec sheets, parts lists). Empty array if nothing found — NEVER invent a URL.
+- sop: a practical standard operating / PM procedure for this equipment (6-10 concise steps)
+- troubleshooting: 4-6 common symptom → likelyCause → fix entries for this equipment type
+- safetyNotes: LOTO and hazard notes (2-4 items)
+- summary: 1-2 sentence overview of the equipment`;
+
+async function fetchAssetDocs(m) {
+  return aiCall(
+    DOCS_PROMPT(m.make || "", m.model || m.name || "", m.serialNumber || "", m.category),
+    null,
+    { useWebSearch: true, maxTokens: 3500 }
+  );
 }
 
 async function aiNameLookup(machineName) {
@@ -887,7 +944,7 @@ function PhotoCapture({ onCapture, label="📸 Scan", loading=false, accept="ima
   const ref = useRef();
   return (
     <>
-      <input type="file" accept={accept} capture="environment" ref={ref} onChange={e=>{const f=e.target.files?.[0]; if(!f)return; const r=new FileReader(); r.onload=ev=>onCapture(ev.target.result.split(",")[1], ev.target.result); r.readAsDataURL(f); e.target.value="";}} style={{display:"none"}} />
+      <input type="file" accept={accept} capture="environment" ref={ref} onChange={e=>{const f=e.target.files?.[0]; if(!f)return; const r=new FileReader(); r.onload=async ev=>{ try { const { base64, dataUrl } = await compressImage(ev.target.result); onCapture(base64, dataUrl); } catch { onCapture(ev.target.result.split(",")[1], ev.target.result); } }; r.readAsDataURL(f); e.target.value="";}} style={{display:"none"}} />
       <button onClick={()=>ref.current?.click()} disabled={loading} style={{ padding:"12px 20px", background:"linear-gradient(135deg,#7c3aed,#a855f7)", border:"none", borderRadius:12, color:"#fff", fontWeight:700, fontSize:13, cursor:loading?"not-allowed":"pointer", opacity:loading?0.6:1, whiteSpace:"nowrap" }}>
         {loading ? "⏳ Parsing..." : label}
       </button>
@@ -1104,6 +1161,19 @@ function MachineDB({ machines, setMachines, showToast }) {
   const [nameLooking, setNameLooking] = useState(false);
   const [journalMode, setJournalMode] = useState(false);
   const [journalResults, setJournalResults] = useState(null);
+  const [docsFetching, setDocsFetching] = useState(null); // machine id currently fetching docs
+
+  const handleFetchDocs = async (m) => {
+    setDocsFetching(m.id);
+    try {
+      const docs = await fetchAssetDocs(m);
+      setMachines(p => p.map(x => x.id === m.id ? { ...x, docs, docsFetchedAt: new Date().toISOString() } : x));
+      showToast(`📚 Docs ready for "${m.name}"`);
+    } catch (err) {
+      showToast("⚠️ Docs lookup failed: " + (err?.message || "unknown error"));
+    }
+    setDocsFetching(null);
+  };
 
   const handleNameLookup = async () => {
     if (!nameQuery.trim()) return;
@@ -1113,8 +1183,8 @@ function MachineDB({ machines, setMachines, showToast }) {
       const parsed = await aiNameLookup(nameQuery.trim());
       if (!parsed) throw new Error("lookup failed");
       setPreview({ ...parsed, _photo: null, _fromNameLookup: true, _nameQuery: nameQuery.trim() });
-    } catch {
-      showToast("⚠️ Couldn't look up that equipment name — try being more specific");
+    } catch (err) {
+      showToast("⚠️ Lookup failed: " + (err?.message || "unknown error"));
     }
     setNameLooking(false);
   };
@@ -1126,8 +1196,8 @@ function MachineDB({ machines, setMachines, showToast }) {
       const parsed = await aiCall(JOURNAL_PROMPT, base64);
       if (!parsed) throw new Error("parse failed");
       setJournalResults({ ...parsed, _photo: dataUrl });
-    } catch {
-      showToast("⚠️ Couldn't parse journal — try better lighting");
+    } catch (err) {
+      showToast("⚠️ Journal scan failed: " + (err?.message || "unknown error"));
     }
     setScanning(false);
   }, [showToast]);
@@ -1141,8 +1211,8 @@ function MachineDB({ machines, setMachines, showToast }) {
       const parsed = await aiCall(NAMEPLATE_PROMPT, base64);
       if (!parsed) throw new Error("parse failed");
       setPreview({ ...parsed, _photo: dataUrl });
-    } catch {
-      showToast("⚠️ Couldn't read nameplate — try better lighting or angle");
+    } catch (err) {
+      showToast("⚠️ Nameplate scan failed: " + (err?.message || "unknown error"));
     }
     setScanning(false);
   }, [showToast]);
@@ -1153,7 +1223,14 @@ function MachineDB({ machines, setMachines, showToast }) {
     setMachines(p => [m, ...p]);
     setSessionLog(s => [{ action:"created", name:m.name, ts:new Date().toISOString() }, ...s]);
     setPreview(null); setDecision(null);
-    showToast(`✅ "${m.name}" created`);
+    showToast(`✅ "${m.name}" created — 📚 fetching manuals & SOP in background...`);
+    // Background docs pull: real manual links (web search) + SOP + troubleshooting
+    fetchAssetDocs(m)
+      .then(docs => {
+        setMachines(p => p.map(x => x.id === m.id ? { ...x, docs, docsFetchedAt: new Date().toISOString() } : x));
+        showToast(`📚 Docs ready for "${m.name}"`);
+      })
+      .catch(err => showToast(`⚠️ Docs lookup failed for "${m.name}": ` + (err?.message || "unknown error")));
   };
 
   // ── CONFIRM MERGE INTO EXISTING ──
@@ -1364,6 +1441,8 @@ function MachineDB({ machines, setMachines, showToast }) {
           {filtered.map(m=>(
             <MachineCard key={m.id} machine={m}
               onEdit={()=>setEditM(m)}
+              docsLoading={docsFetching===m.id}
+              onFetchDocs={()=>handleFetchDocs(m)}
               onDelete={()=>{ setMachines(p=>p.filter(x=>x.id!==m.id)); showToast("🗑 Machine removed"); }} />
           ))}
         </div>
@@ -1563,7 +1642,7 @@ function JournalReview({ results, machines, onAddMachine, onDismiss, showToast }
 }
 
 
-function MachineCard({ machine: m, onEdit, onDelete }) {
+function MachineCard({ machine: m, onEdit, onDelete, onFetchDocs, docsLoading }) {
   const [expanded, setExpanded] = useState(false);
   const photos = m.photos || (m.photo ? [{ url: m.photo, label: "Nameplate" }] : []);
   return (
@@ -1610,11 +1689,71 @@ function MachineCard({ machine: m, onEdit, onDelete }) {
         </div>
       )}
 
-      <div style={{ display:"flex",gap:6,marginTop:8 }}>
+      {expanded && m.docs && <DocsPanel docs={m.docs} fetchedAt={m.docsFetchedAt} />}
+
+      <div style={{ display:"flex",gap:6,marginTop:8,flexWrap:"wrap" }}>
         <button onClick={()=>setExpanded(e=>!e)} style={S.cGhost}>{expanded?"▲ Less":"▼ Details"}</button>
+        {onFetchDocs && (
+          <button onClick={onFetchDocs} disabled={docsLoading} style={{ ...S.cGhost,color:"#38bdf8",opacity:docsLoading?0.6:1 }}>
+            {docsLoading ? "⏳ Fetching..." : m.docs ? "📚 Refresh Docs" : "📚 Get Docs"}
+          </button>
+        )}
         <button onClick={onEdit} style={{ ...S.cGhost,color:"#7c3aed" }}>✏️ Edit</button>
         <button onClick={onDelete} style={{ ...S.cGhost,color:"#f87171",borderColor:"#f8717130" }}>✕</button>
       </div>
+    </div>
+  );
+}
+
+// ─── DOCS PANEL — manuals, SOP, troubleshooting for one asset ───────────────
+function DocsPanel({ docs, fetchedAt }) {
+  const [tab, setTab] = useState("sop");
+  const links = docs.manualLinks?.filter(l => l && l.url) || [];
+  const sop = docs.sop || [];
+  const ts = docs.troubleshooting?.filter(t => t && (t.symptom || t.fix)) || [];
+  const safety = docs.safetyNotes || [];
+  const tabs = [
+    ["sop", `📋 SOP (${sop.length})`],
+    ["ts", `🔧 Troubleshoot (${ts.length})`],
+    ["manuals", `📖 Manuals (${links.length})`],
+    ["safety", `⚠️ Safety (${safety.length})`],
+  ];
+  return (
+    <div style={{ marginBottom:10,background:"rgba(56,189,248,0.06)",border:"1.5px solid rgba(56,189,248,0.25)",borderRadius:12,padding:12 }}>
+      {docs.summary && <div style={{ fontSize:12,color:"#475569",marginBottom:8 }}>{docs.summary}</div>}
+      <div style={{ display:"flex",gap:4,marginBottom:8,flexWrap:"wrap" }}>
+        {tabs.map(([k,label])=>(
+          <button key={k} onClick={()=>setTab(k)}
+            style={{ padding:"4px 10px",fontSize:10,fontWeight:700,borderRadius:8,cursor:"pointer",fontFamily:"inherit",
+              background: tab===k ? "rgba(56,189,248,0.18)" : "transparent",
+              border: tab===k ? "1px solid rgba(56,189,248,0.5)" : "1px solid rgba(148,163,184,0.25)",
+              color: tab===k ? "#0284c7" : "#64748b" }}>
+            {label}
+          </button>
+        ))}
+      </div>
+      {tab==="sop" && (sop.length
+        ? <ol style={{ margin:0,paddingLeft:18 }}>{sop.map((s,i)=><li key={i} style={{ fontSize:12,color:"#334155",marginBottom:4 }}>{s}</li>)}</ol>
+        : <div style={{ fontSize:12,color:"#94a3b8" }}>No SOP generated</div>)}
+      {tab==="ts" && (ts.length
+        ? ts.map((t,i)=>(
+            <div key={i} style={{ marginBottom:8,paddingBottom:8,borderBottom:i<ts.length-1?"1px solid rgba(148,163,184,0.15)":"none" }}>
+              <div style={{ fontSize:12,fontWeight:700,color:"#1e1b4b" }}>⚡ {t.symptom}</div>
+              {t.likelyCause && <div style={{ fontSize:11,color:"#64748b",marginTop:2 }}>Likely cause: {t.likelyCause}</div>}
+              {t.fix && <div style={{ fontSize:11,color:"#0284c7",marginTop:2 }}>Fix: {t.fix}</div>}
+            </div>))
+        : <div style={{ fontSize:12,color:"#94a3b8" }}>No troubleshooting entries</div>)}
+      {tab==="manuals" && (links.length
+        ? links.map((l,i)=>(
+            <a key={i} href={l.url} target="_blank" rel="noopener noreferrer"
+              style={{ display:"block",fontSize:12,color:"#0284c7",fontWeight:600,marginBottom:6,textDecoration:"none" }}>
+              🔗 {l.title || l.url}
+            </a>))
+        : <div style={{ fontSize:12,color:"#94a3b8" }}>No manual links found online — check the manufacturer's site with the model & serial number</div>)}
+      {tab==="safety" && (safety.length
+        ? <ul style={{ margin:0,paddingLeft:18 }}>{safety.map((s,i)=><li key={i} style={{ fontSize:12,color:"#b45309",marginBottom:4 }}>{s}</li>)}</ul>
+        : <div style={{ fontSize:12,color:"#94a3b8" }}>No safety notes</div>)}
+      {fetchedAt && <div style={{ fontSize:9,color:"#94a3b8",marginTop:6 }}>AI-generated {fmtDT(fetchedAt)} — verify against the official manual before critical work</div>}
     </div>
   );
 }
@@ -1631,8 +1770,8 @@ function GaugeLog({ gaugeLogs, setGaugeLogs, assets, showToast }) {
       const parsed = await aiParseImage(base64, GAUGE_PROMPT);
       if (!parsed) throw new Error();
       setPreview({ ...parsed, _photo: dataUrl, _ts: new Date().toISOString() });
-    } catch {
-      showToast("⚠️ Couldn't parse display — try manual entry");
+    } catch (err) {
+      showToast("⚠️ Gauge scan failed: " + (err?.message || "unknown error"));
     }
     setScanning(false);
   }, [showToast]);
