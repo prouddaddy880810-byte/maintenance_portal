@@ -4,11 +4,22 @@
 // Variables, then redeploy. Supports optional web search for docs lookup.
 
 export default async function handler(req, res) {
+  const key = process.env.ANTHROPIC_API_KEY || process.env.VITE_ANTHROPIC_API_KEY;
+
+  // GET = health check: visit /api/ai in a browser to see if the key is configured
+  if (req.method === "GET") {
+    return res.status(200).json({
+      status: "AI proxy is deployed",
+      keyConfigured: !!key,
+      message: key
+        ? "✅ API key is set — parser should work. If scans still fail, the toast will show the exact error."
+        : "❌ No API key found. Add ANTHROPIC_API_KEY in Vercel → Settings → Environment Variables, then Redeploy.",
+    });
+  }
+
   if (req.method !== "POST") {
     return res.status(405).json({ error: "POST only" });
   }
-
-  const key = process.env.ANTHROPIC_API_KEY || process.env.VITE_ANTHROPIC_API_KEY;
   if (!key) {
     return res.status(500).json({
       error:
