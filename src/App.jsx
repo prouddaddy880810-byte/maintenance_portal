@@ -2535,6 +2535,7 @@ export default function App() {
     ["gauge",      "⚡ Gauge Log"],
     ["history",    "PM History"],
     ["worklog",    "📋 Daily Log"],
+    ["assistant",  "💬 Assistant"],
     ["add",        "+ Add Asset"],
   ];
 
@@ -2854,6 +2855,18 @@ export default function App() {
         {/* DAILY WORK LOG */}
         {tab==="worklog" && (
           <DailyWorkLog workEntries={workEntries} setWorkEntries={setWorkEntries} showToast={showToast} />
+        )}
+
+        {/* SHOP ASSISTANT */}
+        {tab==="assistant" && (
+          <ShopAssistant
+            assets={assets}
+            logs={logs}
+            machines={machines}
+            watchItems={watchItems}
+            gaugeLogs={gaugeLogs}
+            workEntries={workEntries}
+          />
         )}
 
         {/* FACILITY MAP */}
@@ -3458,6 +3471,211 @@ function DailyWorkLog({ workEntries, setWorkEntries, showToast }) {
           </div>
         </div>
       )}
+    </div>
+  );
+}
+
+// ─── SHOP ASSISTANT ──────────────────────────────────────────────────────────
+// Facility-aware Q&A. Every question ships with a compact snapshot of the
+// live portal data (assets, PM status, machines, watch list, recent logs) so
+// answers are about THIS shop, not generic advice. Calls /api/ai directly
+// (not aiCall — that helper force-parses JSON; chat needs plain text).
+
+function buildFacilityContext({ assets, logs, machines, watchItems, gaugeLogs, workEntries }) {
+  const lines = ["FACILITY: I&M Machine & Fabrication Corp — St. Joseph, MO (metal fab, CNC, powder coat)"];
+
+  const enriched = (assets || []).map(a => ({ ...a, pm: getPM(a, logs || []) }));
+  if (enriched.length) {
+    lines.push("\nASSETS / PM STATUS:");
+    enriched.forEach(a =>
+      lines.push(`- ${a.name} | ${a.location || "?"} | ${a.category} | PM: ${a.pm.label}${a.pm.days != null ? ` (${a.pm.days}d)` : ""}${a.detail ? ` | ${a.detail}` : ""}`)
+    );
+  }
+
+  if ((machines || []).length) {
+    lines.push("\nMACHINE DATABASE:");
+    machines.forEach(m =>
+      lines.push(`- ${m.name || m.model || "Unknown"}${m.make ? ` | ${m.make}` : ""}${m.model ? ` ${m.model}` : ""}${m.serial ? ` | SN ${m.serial}` : ""}${m.notes ? ` | ${m.notes}` : ""}`)
+    );
+  }
+
+  const openWatch = (watchItems || []).filter(w => !w.resolved);
+  if (openWatch.length) {
+    lines.push("\nWATCH LIST (open issues):");
+    openWatch.forEach(w =>
+      lines.push(`- ${w.assetName || w.name || "?"}: ${w.issue || w.note || w.detail || ""}${w.severity ? ` [${w.severity}]` : ""}`)
+    );
+  }
+
+  const recentLogs = [...(logs || [])].sort((a, b) => new Date(b.date) - new Date(a.date)).slice(0, 15);
+  if (recentLogs.length) {
+    lines.push("\nRECENT PM / REPAIR LOGS:");
+    recentLogs.forEach(l => {
+      const a = (assets || []).find(x => x.id === l.assetId);
+      lines.push(`- ${l.date} | ${a ? a.name : "asset " + l.assetId} | ${l.note || "PM completed"}`);
+    });
+  }
+
+  const recentGauge = [...(gaugeLogs || [])].slice(-8);
+  if (recentGauge.length) {
+    lines.push("\nRECENT GAUGE READINGS:");
+    recentGauge.forEach(g =>
+      lines.push(`- ${g.date || g.timestamp || ""} | ${g.assetName || g.asset || ""} | ${g.reading || g.value || ""} ${g.notes || g.fault || ""}`)
+    );
+  }
+
+  const recentWork = [...(workEntries || [])].sort((a, b) => new Date(b.date) - new Date(a.date)).slice(0, 10);
+  if (recentWork.length) {
+    lines.push("\nRECENT DAILY WORK LOG:");
+    recentWork.forEach(e => lines.push(`- ${e.date} | ${e.tag || ""} | ${e.text || ""}`));
+  }
+
+  return lines.join("\n");
+}
+
+function ShopAssistant({ assets, logs, machines, watchItems, gaugeLogs, workEntries }) {
+  const [messages, setMessages] = useState(() => load("cbv3_chatHistory", []));
+  const [input, setInput]       = useState("");
+  const [busy, setBusy]         = useState(false);
+  const [docsMode, setDocsMode] = useState(false);
+  const [err, setErr]           = useState(null);
+  const scrollRef = useRef(null);
+
+  useEffect(() => { save("cbv3_chatHistory", messages.slice(-40)); }, [messages]);
+  useEffect(() => {
+    if (scrollRef.current) scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
+  }, [messages, busy]);
+
+  async function send() {
+    const q = input.trim();
+    if (!q || busy) return;
+    setErr(null);
+    const nextMsgs = [...messages, { role: "user", text: q, ts: Date.now() }];
+    setMessages(nextMsgs);
+    setInput("");
+    setBusy(true);
+
+    const context = buildFacilityContext({ assets, logs, machines, watchItems, gaugeLogs, workEntries });
+    const transcript = nextMsgs.slice(-10)
+      .map(m => `${m.role === "user" ? "TECH" : "ASSISTANT"}: ${m.text}`)
+      .join("\n");
+
+    const prompt = `You are Shop Assistant, built into the maintenance portal at I&M Machine & Fabrication. You help the maintenance technician (CB) with equipment questions, troubleshooting, PM planning, and prioritization.
+
+RULES:
+- Answer using the FACILITY DATA below first. Reference specific machines, watch items, and log history by name when relevant.
+- If the data doesn't cover it, use general industrial maintenance knowledge and say you're going off general knowledge.
+- Be concise and practical — short answers, plain language, steps when troubleshooting.
+- Always flag safety concerns (lockout/tagout, electrical, hydraulic pressure, lifting) when the task calls for it.
+- Never invent readings, dates, or history that isn't in the data.
+
+${context}
+
+CONVERSATION:
+${transcript}
+
+Respond to the technician's last message. Plain text only, no markdown headers.`;
+
+    try {
+      const resp = await fetch("/api/ai", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ prompt, useWebSearch: docsMode, maxTokens: 1500 }),
+      });
+      let data = null;
+      try { data = await resp.json(); } catch { /* non-JSON */ }
+      if (!resp.ok || !data || typeof data.text !== "string") {
+        throw new Error(data?.error || `Request failed (HTTP ${resp.status})`);
+      }
+      setMessages(p => [...p, { role: "assistant", text: data.text.trim(), ts: Date.now() }]);
+    } catch (e) {
+      setErr(e.message);
+      setMessages(p => [...p, { role: "assistant", text: "⚠️ " + e.message, ts: Date.now(), error: true }]);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  const openWatchCount = (watchItems || []).filter(w => !w.resolved).length;
+
+  return (
+    <div style={S.glassPanel}>
+      <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", flexWrap:"wrap", gap:10, marginBottom:14 }}>
+        <div>
+          <div style={S.secLabel}>Shop Assistant</div>
+          <div style={{ fontSize:12, color:"#94a3b8", marginTop:-8 }}>
+            Knows {(assets||[]).length} assets · {(machines||[]).length} machines · {openWatchCount} open watch items
+          </div>
+        </div>
+        <div style={{ display:"flex", gap:10, alignItems:"center" }}>
+          <label style={{ display:"flex", alignItems:"center", gap:6, fontSize:12, color: docsMode ? "#7c3aed" : "#94a3b8", cursor:"pointer", fontWeight: docsMode ? 700 : 500 }}>
+            <input type="checkbox" checked={docsMode} onChange={e=>setDocsMode(e.target.checked)} />
+            🌐 Docs lookup
+          </label>
+          {messages.length > 0 && (
+            <button
+              onClick={() => { setMessages([]); save("cbv3_chatHistory", []); }}
+              style={{ ...S.catBtn, fontSize:11 }}>
+              Clear
+            </button>
+          )}
+        </div>
+      </div>
+
+      <div ref={scrollRef} style={{
+        maxHeight:"52vh", minHeight:220, overflowY:"auto",
+        background:"rgba(124,58,237,0.03)", border:"1px solid rgba(124,58,237,0.08)",
+        borderRadius:16, padding:16, marginBottom:12,
+        display:"flex", flexDirection:"column", gap:10
+      }}>
+        {messages.length === 0 && (
+          <div style={{ color:"#94a3b8", fontSize:13, lineHeight:1.7 }}>
+            Ask about anything on the floor. Try:
+            <div style={{ display:"flex", flexWrap:"wrap", gap:8, marginTop:10 }}>
+              {["What's open on the watch list?",
+                "What PM is overdue right now?",
+                "Kaeser compressor threw E403 again — walk me through it",
+                "What should I hit first today?"].map(s => (
+                <button key={s} onClick={()=>setInput(s)} style={{ ...S.catBtn, fontSize:11 }}>{s}</button>
+              ))}
+            </div>
+          </div>
+        )}
+        {messages.map((m, i) => (
+          <div key={m.ts + "-" + i} style={{
+            alignSelf: m.role === "user" ? "flex-end" : "flex-start",
+            maxWidth:"85%",
+            background: m.role === "user" ? "rgba(124,58,237,0.12)" : (m.error ? "rgba(248,113,113,0.08)" : "rgba(255,255,255,0.85)"),
+            border: m.role === "user" ? "1px solid rgba(124,58,237,0.25)" : (m.error ? "1px solid rgba(248,113,113,0.25)" : "1px solid rgba(124,58,237,0.1)"),
+            color:"#1e1b4b", borderRadius:14, padding:"10px 14px",
+            fontSize:13.5, lineHeight:1.55, whiteSpace:"pre-wrap", wordBreak:"break-word"
+          }}>
+            {m.text}
+          </div>
+        ))}
+        {busy && (
+          <div style={{ alignSelf:"flex-start", color:"#7c3aed", fontSize:13, fontWeight:600, padding:"6px 4px" }}>
+            {docsMode ? "Checking docs…" : "Thinking…"}
+          </div>
+        )}
+      </div>
+
+      {err && <div style={{ color:"#f87171", fontSize:12, marginBottom:8 }}>Last request failed: {err}</div>}
+
+      <div style={{ display:"flex", gap:8 }}>
+        <input
+          style={{ ...S.inp, flex:1 }}
+          value={input}
+          onChange={e=>setInput(e.target.value)}
+          onKeyDown={e=>{ if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); } }}
+          placeholder="Ask about a machine, fault code, PM, or what to prioritize…"
+          disabled={busy}
+        />
+        <button onClick={send} disabled={busy || !input.trim()}
+          style={{ ...S.btnP, flex:"0 0 auto", padding:"11px 22px", opacity: busy || !input.trim() ? 0.5 : 1 }}>
+          {busy ? "…" : "Send"}
+        </button>
+      </div>
     </div>
   );
 }
