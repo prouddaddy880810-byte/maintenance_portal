@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, useCallback } from "react";
+import { useState, useEffect, useRef, useCallback, useMemo } from "react";
 
 // ─── CONSTANTS ───────────────────────────────────────────────────────────────
 const TODAY = new Date().toISOString().split("T")[0];
@@ -679,7 +679,9 @@ function getPM(asset, logs) {
 async function aiParseImage(base64, prompt) { return aiCall(prompt, base64); }
 
 const GAUGE_PROMPT = `Parse this compressor/equipment display and return ONLY valid JSON, no markdown:
-{"pressure":null,"temp":null,"timeDisplay":null,"status":null,"keyMode":null,"runHours":null,"loadHours":null,"maintenanceIn":null,"extraFields":{}}
+{"pressure":null,"temp":null,"timeDisplay":null,"status":null,"keyMode":null,"warning":null,"runHours":null,"loadHours":null,"maintenanceIn":null,"extraFields":{}}
+- keyMode: ONLY the key switch / control mode text (e.g. "Key - On | Auto Restart Enabled", "On | pA - Load"). Never put a fault or warning message here.
+- warning: any WARNING, FAULT, or ALARM message/code shown on the display (e.g. "Warning A616: Lubrication System", "FAULT E403: Compressor Discharge Temp"). null if none is shown.
 Fill in any values visible. Use null for anything not shown.`;
 
 const NAMEPLATE_PROMPT = `Parse this machine/equipment nameplate photo and return ONLY valid JSON, no markdown:
@@ -968,7 +970,11 @@ function EditModal({ item, fields, title, onSave, onClose }) {
             <Lbl>{f.label}</Lbl>
             {f.type==="select" ? (
               <select value={form[f.key]||""} onChange={e=>set(f.key,e.target.value)} style={S.inp}>
-                {f.options.map(o=><option key={o} value={o}>{o}</option>)}
+                {f.options.map(o=>{
+                  const val = (o && typeof o === "object") ? o.value : o;
+                  const lbl = (o && typeof o === "object") ? o.label : o;
+                  return <option key={val} value={val}>{lbl}</option>;
+                })}
               </select>
             ) : f.type==="textarea" ? (
               <textarea value={form[f.key]||""} onChange={e=>set(f.key,e.target.value)} rows={3} style={{...S.inp,resize:"vertical"}} />
@@ -1759,10 +1765,29 @@ function DocsPanel({ docs, fetchedAt }) {
 }
 
 // ─── GAUGE LOG TAB ───────────────────────────────────────────────────────────
-function GaugeLog({ gaugeLogs, setGaugeLogs, assets, showToast }) {
+function GaugeLog({ gaugeLogs, setGaugeLogs, assets, machines, showToast }) {
   const [scanning, setScanning] = useState(false);
   const [preview, setPreview]   = useState(null);
   const [editLog, setEditLog]   = useState(null);
+
+  // Every possible thing a reading can belong to: the original asset catalog
+  // (numeric ids) plus any machine scanned/created via the nameplate parser
+  // ("m"-prefixed ids so the two id spaces never collide).
+  const targets = useMemo(() => [
+    ...assets.map(a => ({ id: a.id, name: a.name, location: a.location })),
+    ...machines.map(m => ({ id: `m${m.id}`, name: m.name || `${m.make||""} ${m.model||""}`.trim() || "Unnamed machine", location: m.location })),
+  ], [assets, machines]);
+
+  const [selectedTargetId, setSelectedTargetId] = useState(() => load("cbv3_gaugeTarget", targets[0]?.id ?? null));
+  const [filterTargetId,   setFilterTargetId]   = useState("all");
+
+  useEffect(() => { save("cbv3_gaugeTarget", selectedTargetId); }, [selectedTargetId]);
+
+  const targetName = (id) => targets.find(t => String(t.id) === String(id))?.name || "Unassigned";
+
+  const visibleLogs = filterTargetId === "all"
+    ? gaugeLogs
+    : gaugeLogs.filter(l => String(l.assetId) === String(filterTargetId));
 
   const handleScan = useCallback(async (base64, dataUrl) => {
     setScanning(true);
@@ -1779,22 +1804,24 @@ function GaugeLog({ gaugeLogs, setGaugeLogs, assets, showToast }) {
   const confirmLog = () => {
     if (!preview) return;
     const entry = {
-      id: Date.now(), assetId: 11,
+      id: Date.now(), assetId: selectedTargetId,
       timestamp: preview._ts,
       pressure: preview.pressure, temp: preview.temp,
       runHours: preview.runHours, loadHours: preview.loadHours,
       maintenanceIn: preview.maintenanceIn,
       status: preview.status || "On Load",
       keyMode: preview.keyMode || "",
+      warning: preview.warning || "",
       notes: "", photo: preview._photo, source: "photo"
     };
     setGaugeLogs(p=>[entry,...p]);
-    sheetsPost("logGauge", { ...entry, assetName: assets.find(a=>a.id===entry.assetId)?.name || "" });
+    sheetsPost("logGauge", { ...entry, assetName: targetName(entry.assetId) });
     setPreview(null);
-    showToast("✅ Gauge reading logged");
+    showToast(`✅ Gauge reading logged — ${targetName(entry.assetId)}`);
   };
 
   const logFields = [
+    { key:"assetId", label:"Machine", type:"select", options: targets.map(t=>({ value:String(t.id), label: t.location?`${t.name} — ${t.location}`:t.name })) },
     { key:"timestamp", label:"Date/Time", type:"datetime-local" },
     { key:"pressure", label:"Pressure (psi)", type:"number" },
     { key:"temp", label:"Temperature (°F)", type:"number" },
@@ -1802,11 +1829,12 @@ function GaugeLog({ gaugeLogs, setGaugeLogs, assets, showToast }) {
     { key:"loadHours", label:"Load Hours", type:"number" },
     { key:"maintenanceIn", label:"Maintenance In (h)", type:"number" },
     { key:"status", label:"Status", type:"select", options:["On Load","Off Load","Standby","Idle","Fault"] },
-    { key:"keyMode", label:"Key Mode" },
+    { key:"keyMode", label:"Key Mode", },
+    { key:"warning", label:"⚠️ Warning / Fault" },
     { key:"notes", label:"Notes", type:"textarea" },
   ];
 
-  const latest = gaugeLogs[0];
+  const latest = gaugeLogs.find(l => String(l.assetId) === String(selectedTargetId)) || null;
 
   return (
     <div>
@@ -1830,10 +1858,29 @@ function GaugeLog({ gaugeLogs, setGaugeLogs, assets, showToast }) {
         ))}
       </div>
 
+      {/* MACHINE PICKER */}
+      <div style={{ marginBottom:14 }}>
+        <div style={{ fontSize:10,color:"#94a3b8",marginBottom:4,fontWeight:700 }}>📍 LOGGING FOR</div>
+        <select value={selectedTargetId||""} onChange={e=>setSelectedTargetId(e.target.value)}
+          style={{ ...S.inp, fontWeight:700, color:"#7c3aed" }}>
+          {targets.map(t=>(
+            <option key={t.id} value={t.id}>{t.location ? `${t.name} — ${t.location}` : t.name}</option>
+          ))}
+        </select>
+      </div>
+
+      {/* ACTIVE WARNING BANNER */}
+      {latest?.warning && (
+        <div style={{ background:"rgba(248,113,113,0.12)",border:"2px solid rgba(248,113,113,0.4)",borderRadius:14,padding:"12px 16px",marginBottom:16 }}>
+          <div style={{ fontWeight:800,color:"#dc2626",fontSize:13 }}>⚠️ Active Warning — {targetName(latest.assetId)}</div>
+          <div style={{ color:"#991b1b",fontSize:12,marginTop:2 }}>{latest.warning}</div>
+        </div>
+      )}
+
       {/* CONTROLS */}
       <div style={{ display:"flex",gap:10,marginBottom:20,flexWrap:"wrap" }}>
         <PhotoCapture onCapture={handleScan} label="📸 Scan Gauge Display" loading={scanning} />
-        <button onClick={()=>setEditLog({ id:Date.now(),assetId:11,timestamp:new Date().toISOString().slice(0,16),pressure:"",temp:"",runHours:"",loadHours:"",maintenanceIn:"",status:"On Load",keyMode:"",notes:"",photo:null,source:"manual" })} style={{ padding:"12px 20px",background:"rgba(255,255,255,0.7)",border:"1.5px solid rgba(124,58,237,0.2)",borderRadius:12,color:"#7c3aed",fontWeight:700,fontSize:13,cursor:"pointer" }}>
+        <button onClick={()=>setEditLog({ id:Date.now(),assetId:selectedTargetId,timestamp:new Date().toISOString().slice(0,16),pressure:"",temp:"",runHours:"",loadHours:"",maintenanceIn:"",status:"On Load",keyMode:"",warning:"",notes:"",photo:null,source:"manual" })} style={{ padding:"12px 20px",background:"rgba(255,255,255,0.7)",border:"1.5px solid rgba(124,58,237,0.2)",borderRadius:12,color:"#7c3aed",fontWeight:700,fontSize:13,cursor:"pointer" }}>
           ✍️ Manual Entry
         </button>
       </div>
@@ -1843,30 +1890,44 @@ function GaugeLog({ gaugeLogs, setGaugeLogs, assets, showToast }) {
         <div style={{ background:"rgba(124,58,237,0.08)",border:"2px solid rgba(124,58,237,0.35)",borderRadius:16,padding:18,marginBottom:20 }}>
           <div style={{ fontWeight:800,color:"#7c3aed",marginBottom:10 }}>⚡ Parsed — Review & Confirm</div>
           <div style={{ display:"grid",gridTemplateColumns:"repeat(3,1fr)",gap:8,marginBottom:12 }}>
-            {[["Pressure",`${preview.pressure} psi`],["Temp",`${preview.temp}°F`],["Status",preview.status],["Run Hrs",`${preview.runHours?.toLocaleString()}h`],["Load Hrs",`${preview.loadHours?.toLocaleString()}h`],["Maint In",`${preview.maintenanceIn}h`]].map(([k,v])=>(
+            {[["Pressure",`${preview.pressure} psi`],["Temp",`${preview.temp}°F`],["Status",preview.status],["Run Hrs",`${preview.runHours?.toLocaleString()}h`],["Load Hrs",`${preview.loadHours?.toLocaleString()}h`],["Maint In",`${preview.maintenanceIn}h`],["Key Mode",preview.keyMode]].map(([k,v])=>(
               <div key={k} style={{ background:"rgba(255,255,255,0.5)",borderRadius:8,padding:"8px 10px" }}>
                 <div style={{ color:"#94a3b8",fontSize:9 }}>{k}</div>
                 <div style={{ color:"#1e1b4b",fontWeight:700,fontSize:13 }}>{v||"—"}</div>
               </div>
             ))}
           </div>
+          {preview.warning && (
+            <div style={{ background:"rgba(248,113,113,0.12)",border:"1.5px solid rgba(248,113,113,0.4)",borderRadius:8,padding:"8px 10px",marginBottom:12 }}>
+              <div style={{ color:"#dc2626",fontSize:9,fontWeight:700 }}>⚠️ WARNING DETECTED</div>
+              <div style={{ color:"#991b1b",fontWeight:700,fontSize:13 }}>{preview.warning}</div>
+            </div>
+          )}
           {preview._photo && <img src={preview._photo} alt="gauge" style={{ width:"100%",maxHeight:100,objectFit:"cover",borderRadius:8,marginBottom:12,opacity:0.85 }} />}
           <div style={{ display:"flex",gap:8 }}>
             <button onClick={confirmLog} style={{ flex:1,background:"#10b981",border:"none",borderRadius:10,color:"#fff",padding:"10px 0",fontWeight:700,cursor:"pointer" }}>✅ Log It</button>
-            <button onClick={()=>{ const e={...preview,id:Date.now(),assetId:11,timestamp:preview._ts,photo:preview._photo,source:"photo",notes:""}; setEditLog(e); setPreview(null); }} style={{ flex:1,background:"rgba(124,58,237,0.15)",border:"1px solid #7c3aed",borderRadius:10,color:"#7c3aed",padding:"10px 0",cursor:"pointer" }}>✏️ Edit</button>
+            <button onClick={()=>{ const e={...preview,id:Date.now(),assetId:selectedTargetId,timestamp:preview._ts,photo:preview._photo,source:"photo",notes:""}; setEditLog(e); setPreview(null); }} style={{ flex:1,background:"rgba(124,58,237,0.15)",border:"1px solid #7c3aed",borderRadius:10,color:"#7c3aed",padding:"10px 0",cursor:"pointer" }}>✏️ Edit</button>
             <button onClick={()=>setPreview(null)} style={{ background:"rgba(248,113,113,0.1)",border:"1px solid #f87171",borderRadius:10,color:"#f87171",padding:"10px 14px",cursor:"pointer" }}>✕</button>
           </div>
         </div>
       )}
 
       {/* LOG LIST */}
-      <div style={{ fontSize:11,color:"#94a3b8",marginBottom:12 }}>{gaugeLogs.length} reading{gaugeLogs.length!==1?"s":""} logged · Kaeser Compressor-01</div>
-      {gaugeLogs.map(log=>(
+      <div style={{ display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:12,flexWrap:"wrap",gap:8 }}>
+        <div style={{ fontSize:11,color:"#94a3b8" }}>{visibleLogs.length} reading{visibleLogs.length!==1?"s":""} logged</div>
+        <select value={filterTargetId} onChange={e=>setFilterTargetId(e.target.value)}
+          style={{ ...S.inp, width:"auto", fontSize:11, padding:"6px 10px" }}>
+          <option value="all">Show: All Machines</option>
+          {targets.map(t=><option key={t.id} value={t.id}>Show: {t.name}</option>)}
+        </select>
+      </div>
+      {visibleLogs.map(log=>(
         <div key={log.id} style={{ background:"rgba(255,255,255,0.65)",border:"1.5px solid rgba(124,58,237,0.1)",borderRadius:16,padding:16,marginBottom:10,backdropFilter:"blur(20px)" }}>
           <div style={{ display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:10 }}>
             <div>
               <div style={{ fontWeight:700,fontSize:13,color:"#1e1b4b" }}>{fmtDT(log.timestamp)}</div>
-              <div style={{ display:"flex",gap:6,marginTop:4 }}>
+              <div style={{ display:"flex",gap:6,marginTop:4,flexWrap:"wrap" }}>
+                <Badge label={targetName(log.assetId)} color="#0284c7" />
                 <Badge label={log.source||"manual"} />
                 {log.status && <Badge label={log.status} color="#7c3aed" />}
               </div>
@@ -1876,6 +1937,12 @@ function GaugeLog({ gaugeLogs, setGaugeLogs, assets, showToast }) {
               <button onClick={()=>{ setGaugeLogs(p=>p.filter(x=>x.id!==log.id)); showToast("🗑 Log removed"); }} style={{ padding:"4px 10px",background:"rgba(248,113,113,0.1)",border:"1px solid rgba(248,113,113,0.3)",borderRadius:6,color:"#f87171",fontSize:11,cursor:"pointer" }}>🗑</button>
             </div>
           </div>
+          {log.warning && (
+            <div style={{ background:"rgba(248,113,113,0.1)",border:"1px solid rgba(248,113,113,0.35)",borderRadius:8,padding:"7px 10px",marginBottom:8 }}>
+              <div style={{ color:"#dc2626",fontSize:9,fontWeight:700 }}>⚠️ WARNING</div>
+              <div style={{ color:"#991b1b",fontWeight:700,fontSize:13 }}>{log.warning}</div>
+            </div>
+          )}
           <div style={{ display:"grid",gridTemplateColumns:"repeat(3,1fr)",gap:8 }}>
             {[
               { k:"Pressure", v:log.pressure?`${log.pressure} psi`:null, alert:log.pressure>120 },
@@ -2849,7 +2916,7 @@ export default function App() {
 
         {/* GAUGE LOG TAB */}
         {tab==="gauge" && (
-          <GaugeLog gaugeLogs={gaugeLogs} setGaugeLogs={setGaugeLogs} assets={assets} showToast={showToast} />
+          <GaugeLog gaugeLogs={gaugeLogs} setGaugeLogs={setGaugeLogs} assets={assets} machines={machines} showToast={showToast} />
         )}
 
         {/* DAILY WORK LOG */}
