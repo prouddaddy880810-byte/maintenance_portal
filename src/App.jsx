@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, useCallback, useMemo } from "react";
+import { useState, useEffect, useRef, useCallback } from "react";
 
 // ─── CONSTANTS ───────────────────────────────────────────────────────────────
 const TODAY = new Date().toISOString().split("T")[0];
@@ -642,16 +642,32 @@ function save(k, v)  { try { localStorage.setItem(k, JSON.stringify(v)); } catch
 // ─── GOOGLE SHEETS BACKEND ───────────────────────────────────────────────────
 const SHEETS_URL = "https://script.google.com/macros/s/AKfycbyNZWEL8Ro0hTqBZfqEEaR13QGfEFqJhHSlULs841nDx-107gfetZN7ow87d-p-KRpFbA/exec";
 
-async function sheetsPost(action, data) {
+// Tracks whether we've already warned about a sync failure this session so we
+// don't spam a toast on every log action when the endpoint is down/expired.
+let _sheetsSyncWarnedThisSession = false;
+
+async function sheetsPost(action, data, onSyncError) {
   try {
     const res = await fetch(SHEETS_URL, {
       method: "POST",
       headers: { "Content-Type": "text/plain" },
       body: JSON.stringify({ action, data }),
     });
-    return await res.json();
+    const result = await res.json();
+    // If the script returns an explicit error, treat it as a sync failure.
+    if (result?.success === false) throw new Error(result.error || "Apps Script returned success:false");
+    _sheetsSyncWarnedThisSession = false; // reset on successful sync
+    return result;
   } catch (err) {
-    console.warn("Sheets sync failed:", err);
+    console.warn("[Sheets sync failed]", action, err.message || err);
+    if (!_sheetsSyncWarnedThisSession) {
+      _sheetsSyncWarnedThisSession = true;
+      // Call the optional callback so App can show a toast — avoids coupling
+      // this module-level function to any React state directly.
+      if (typeof onSyncError === "function") {
+        onSyncError("⚠️ Google Sheets sync offline — data saved locally");
+      }
+    }
     return { success: false, error: err.toString() };
   }
 }
@@ -663,11 +679,16 @@ function diffDays(a,b){ return Math.round((b-a)/86400000); }
 function fmtDT(iso)  { if(!iso) return "—"; const d=new Date(iso); return d.toLocaleString("en-US",{month:"short",day:"numeric",year:"numeric",hour:"numeric",minute:"2-digit"}); }
 
 function getPM(asset, logs) {
+  if (!asset || typeof asset !== "object") return { label:"Log only", color:"#94a3b8", days:null, next:null };
   if (!asset.pmEnabled) return { label:"Log only", color:"#94a3b8", days:null, next:null };
-  const al = logs.filter(l => l.assetId===asset.id);
+  const interval = Number(asset.intervalDays);
+  if (!Number.isFinite(interval) || interval <= 0) return { label:"Log only", color:"#94a3b8", days:null, next:null };
+  const al = (logs || []).filter(l => l && l.assetId===asset.id);
   if (!al.length) return { label:"Never logged", color:"#f87171", days:null, next:null };
   const last = al.sort((a,b) => new Date(b.date)-new Date(a.date))[0];
-  const next = addDays(fromStr(last.date), asset.intervalDays);
+  const lastDate = fromStr(last.date);
+  if (isNaN(lastDate.getTime())) return { label:"Never logged", color:"#f87171", days:null, next:null };
+  const next = addDays(lastDate, interval);
   const diff = diffDays(new Date(), next);
   if (diff<0) return { label:"Overdue", color:"#f87171", days:diff, next };
   if (diff<=7) return { label:"Due soon", color:"#f59e0b", days:diff, next };
@@ -679,9 +700,7 @@ function getPM(asset, logs) {
 async function aiParseImage(base64, prompt) { return aiCall(prompt, base64); }
 
 const GAUGE_PROMPT = `Parse this compressor/equipment display and return ONLY valid JSON, no markdown:
-{"pressure":null,"temp":null,"timeDisplay":null,"status":null,"keyMode":null,"warning":null,"runHours":null,"loadHours":null,"maintenanceIn":null,"extraFields":{}}
-- keyMode: ONLY the key switch / control mode text (e.g. "Key - On | Auto Restart Enabled", "On | pA - Load"). Never put a fault or warning message here.
-- warning: any WARNING, FAULT, or ALARM message/code shown on the display (e.g. "Warning A616: Lubrication System", "FAULT E403: Compressor Discharge Temp"). null if none is shown.
+{"pressure":null,"temp":null,"timeDisplay":null,"status":null,"keyMode":null,"runHours":null,"loadHours":null,"maintenanceIn":null,"extraFields":{}}
 Fill in any values visible. Use null for anything not shown.`;
 
 const NAMEPLATE_PROMPT = `Parse this machine/equipment nameplate photo and return ONLY valid JSON, no markdown:
@@ -730,82 +749,37 @@ Extract ALL information you can read and return ONLY valid JSON, no markdown:
 - pmIntervalDays: infer from equipment type if not stated
 Do your best even if handwriting is messy. Include partial data rather than skipping entries.`;
 
-// AI call with optional image — routed through /api/ai serverless proxy so the
-// API key never ships in the browser bundle. THROWS with a real error message
-// on failure instead of silently returning {} (that silence caused the
-// "parser doesn't work" black box).
-async function aiCall(prompt, base64 = null, opts = {}) {
-  let resp;
+// AI call with optional image (null base64 = text-only). Always returns parsed
+// JSON object or null — never throws. Callers should treat null as a failure.
+async function aiCall(prompt, base64 = null) {
   try {
-    resp = await fetch("/api/ai", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        prompt,
-        image: base64 ? { data: base64, mediaType: opts.mediaType || "image/jpeg" } : null,
-        useWebSearch: !!opts.useWebSearch,
-        maxTokens: opts.maxTokens,
-      }),
+    const content = [];
+    if (base64) content.push({ type:"image", source:{ type:"base64", media_type:"image/jpeg", data:base64 }});
+    content.push({ type:"text", text:prompt });
+    const resp = await fetch("https://api.anthropic.com/v1/messages", {
+      method:"POST",
+      headers:{
+        "Content-Type":"application/json",
+        "x-api-key": import.meta.env.VITE_ANTHROPIC_API_KEY || "",
+        "anthropic-version": "2023-06-01",
+        "anthropic-dangerous-direct-browser-access": "true"
+      },
+      body: JSON.stringify({ model:"claude-sonnet-4-6", max_tokens:2000, messages:[{ role:"user", content }]})
     });
-  } catch (e) {
-    throw new Error("Network error reaching AI service — check connection");
+    const data = await resp.json();
+    // Surface auth/rate errors explicitly to the console for debugging.
+    if (!resp.ok || data.error) {
+      console.error("[aiCall] API error:", resp.status, data.error || data);
+      return null;
+    }
+    const text = data.content?.find(b=>b.type==="text")?.text || "{}";
+    try { return JSON.parse(text.replace(/```json|```/g,"").trim()); }
+    catch { return null; }
+  } catch (err) {
+    // Network error, timeout, CORS, etc.
+    console.error("[aiCall] fetch failed:", err.message || err);
+    return null;
   }
-  let data = null;
-  try { data = await resp.json(); } catch { /* non-JSON (e.g. 404 page) */ }
-  if (!resp.ok || !data || typeof data.text !== "string") {
-    const msg = data?.error
-      || (resp.status === 404
-          ? "AI endpoint /api/ai not found — this only works on the Vercel deployment (or `vercel dev` locally)"
-          : `AI request failed (HTTP ${resp.status})`);
-    throw new Error(msg);
-  }
-  const text = data.text;
-  try { return JSON.parse(text.replace(/```json|```/g, "").trim()); }
-  catch {
-    const block = text.match(/\{[\s\S]*\}/);
-    if (block) { try { return JSON.parse(block[0]); } catch { /* fall through */ } }
-    throw new Error("AI responded but the output wasn't valid JSON — try again");
-  }
-}
-
-// Downscale + JPEG-compress a captured photo so it never blows the 5MB API
-// image limit (raw phone photos are 3–12MB; HEIC/PNG get normalized to JPEG).
-function compressImage(srcDataUrl, maxDim = 1568, quality = 0.85) {
-  return new Promise((resolve, reject) => {
-    const img = new Image();
-    img.onload = () => {
-      try {
-        const scale = Math.min(1, maxDim / Math.max(img.width, img.height));
-        const c = document.createElement("canvas");
-        c.width = Math.max(1, Math.round(img.width * scale));
-        c.height = Math.max(1, Math.round(img.height * scale));
-        c.getContext("2d").drawImage(img, 0, 0, c.width, c.height);
-        const out = c.toDataURL("image/jpeg", quality);
-        resolve({ base64: out.split(",")[1], dataUrl: out });
-      } catch (e) { reject(new Error("Couldn't process image: " + e.message)); }
-    };
-    img.onerror = () => reject(new Error("Couldn't read that image format"));
-    img.src = srcDataUrl;
-  });
-}
-
-// ─── DOCS ENGINE — manuals, SOP, troubleshooting per asset ──────────────────
-const DOCS_PROMPT = (make, model, serial, category) =>
-`You are an industrial maintenance documentation assistant. Equipment: ${make} ${model}${serial ? `, S/N ${serial}` : ""} (${category || "machine"}).
-Use web search to find the official user/service manual for this exact make and model. Then return ONLY valid JSON, no markdown:
-{"manualLinks":[{"title":null,"url":null}],"sop":[],"troubleshooting":[{"symptom":null,"likelyCause":null,"fix":null}],"safetyNotes":[],"summary":null}
-- manualLinks: up to 3 REAL urls found via search (manufacturer manuals, spec sheets, parts lists). Empty array if nothing found — NEVER invent a URL.
-- sop: a practical standard operating / PM procedure for this equipment (6-10 concise steps)
-- troubleshooting: 4-6 common symptom → likelyCause → fix entries for this equipment type
-- safetyNotes: LOTO and hazard notes (2-4 items)
-- summary: 1-2 sentence overview of the equipment`;
-
-async function fetchAssetDocs(m) {
-  return aiCall(
-    DOCS_PROMPT(m.make || "", m.model || m.name || "", m.serialNumber || "", m.category),
-    null,
-    { useWebSearch: true, maxTokens: 3500 }
-  );
 }
 
 async function aiNameLookup(machineName) {
@@ -946,7 +920,7 @@ function PhotoCapture({ onCapture, label="📸 Scan", loading=false, accept="ima
   const ref = useRef();
   return (
     <>
-      <input type="file" accept={accept} capture="environment" ref={ref} onChange={e=>{const f=e.target.files?.[0]; if(!f)return; const r=new FileReader(); r.onload=async ev=>{ try { const { base64, dataUrl } = await compressImage(ev.target.result); onCapture(base64, dataUrl); } catch { onCapture(ev.target.result.split(",")[1], ev.target.result); } }; r.readAsDataURL(f); e.target.value="";}} style={{display:"none"}} />
+      <input type="file" accept={accept} capture="environment" ref={ref} onChange={e=>{const f=e.target.files?.[0]; if(!f)return; const r=new FileReader(); r.onload=ev=>onCapture(ev.target.result.split(",")[1], ev.target.result); r.readAsDataURL(f); e.target.value="";}} style={{display:"none"}} />
       <button onClick={()=>ref.current?.click()} disabled={loading} style={{ padding:"12px 20px", background:"linear-gradient(135deg,#7c3aed,#a855f7)", border:"none", borderRadius:12, color:"#fff", fontWeight:700, fontSize:13, cursor:loading?"not-allowed":"pointer", opacity:loading?0.6:1, whiteSpace:"nowrap" }}>
         {loading ? "⏳ Parsing..." : label}
       </button>
@@ -970,11 +944,7 @@ function EditModal({ item, fields, title, onSave, onClose }) {
             <Lbl>{f.label}</Lbl>
             {f.type==="select" ? (
               <select value={form[f.key]||""} onChange={e=>set(f.key,e.target.value)} style={S.inp}>
-                {f.options.map(o=>{
-                  const val = (o && typeof o === "object") ? o.value : o;
-                  const lbl = (o && typeof o === "object") ? o.label : o;
-                  return <option key={val} value={val}>{lbl}</option>;
-                })}
+                {f.options.map(o=><option key={o} value={o}>{o}</option>)}
               </select>
             ) : f.type==="textarea" ? (
               <textarea value={form[f.key]||""} onChange={e=>set(f.key,e.target.value)} rows={3} style={{...S.inp,resize:"vertical"}} />
@@ -1167,19 +1137,6 @@ function MachineDB({ machines, setMachines, showToast }) {
   const [nameLooking, setNameLooking] = useState(false);
   const [journalMode, setJournalMode] = useState(false);
   const [journalResults, setJournalResults] = useState(null);
-  const [docsFetching, setDocsFetching] = useState(null); // machine id currently fetching docs
-
-  const handleFetchDocs = async (m) => {
-    setDocsFetching(m.id);
-    try {
-      const docs = await fetchAssetDocs(m);
-      setMachines(p => p.map(x => x.id === m.id ? { ...x, docs, docsFetchedAt: new Date().toISOString() } : x));
-      showToast(`📚 Docs ready for "${m.name}"`);
-    } catch (err) {
-      showToast("⚠️ Docs lookup failed: " + (err?.message || "unknown error"));
-    }
-    setDocsFetching(null);
-  };
 
   const handleNameLookup = async () => {
     if (!nameQuery.trim()) return;
@@ -1189,8 +1146,8 @@ function MachineDB({ machines, setMachines, showToast }) {
       const parsed = await aiNameLookup(nameQuery.trim());
       if (!parsed) throw new Error("lookup failed");
       setPreview({ ...parsed, _photo: null, _fromNameLookup: true, _nameQuery: nameQuery.trim() });
-    } catch (err) {
-      showToast("⚠️ Lookup failed: " + (err?.message || "unknown error"));
+    } catch {
+      showToast("⚠️ Couldn't look up that equipment name — try being more specific");
     }
     setNameLooking(false);
   };
@@ -1202,8 +1159,8 @@ function MachineDB({ machines, setMachines, showToast }) {
       const parsed = await aiCall(JOURNAL_PROMPT, base64);
       if (!parsed) throw new Error("parse failed");
       setJournalResults({ ...parsed, _photo: dataUrl });
-    } catch (err) {
-      showToast("⚠️ Journal scan failed: " + (err?.message || "unknown error"));
+    } catch {
+      showToast("⚠️ Couldn't parse journal — try better lighting");
     }
     setScanning(false);
   }, [showToast]);
@@ -1217,8 +1174,8 @@ function MachineDB({ machines, setMachines, showToast }) {
       const parsed = await aiCall(NAMEPLATE_PROMPT, base64);
       if (!parsed) throw new Error("parse failed");
       setPreview({ ...parsed, _photo: dataUrl });
-    } catch (err) {
-      showToast("⚠️ Nameplate scan failed: " + (err?.message || "unknown error"));
+    } catch {
+      showToast("⚠️ Couldn't read nameplate — try better lighting or angle");
     }
     setScanning(false);
   }, [showToast]);
@@ -1229,14 +1186,7 @@ function MachineDB({ machines, setMachines, showToast }) {
     setMachines(p => [m, ...p]);
     setSessionLog(s => [{ action:"created", name:m.name, ts:new Date().toISOString() }, ...s]);
     setPreview(null); setDecision(null);
-    showToast(`✅ "${m.name}" created — 📚 fetching manuals & SOP in background...`);
-    // Background docs pull: real manual links (web search) + SOP + troubleshooting
-    fetchAssetDocs(m)
-      .then(docs => {
-        setMachines(p => p.map(x => x.id === m.id ? { ...x, docs, docsFetchedAt: new Date().toISOString() } : x));
-        showToast(`📚 Docs ready for "${m.name}"`);
-      })
-      .catch(err => showToast(`⚠️ Docs lookup failed for "${m.name}": ` + (err?.message || "unknown error")));
+    showToast(`✅ "${m.name}" created`);
   };
 
   // ── CONFIRM MERGE INTO EXISTING ──
@@ -1447,8 +1397,6 @@ function MachineDB({ machines, setMachines, showToast }) {
           {filtered.map(m=>(
             <MachineCard key={m.id} machine={m}
               onEdit={()=>setEditM(m)}
-              docsLoading={docsFetching===m.id}
-              onFetchDocs={()=>handleFetchDocs(m)}
               onDelete={()=>{ setMachines(p=>p.filter(x=>x.id!==m.id)); showToast("🗑 Machine removed"); }} />
           ))}
         </div>
@@ -1648,7 +1596,7 @@ function JournalReview({ results, machines, onAddMachine, onDismiss, showToast }
 }
 
 
-function MachineCard({ machine: m, onEdit, onDelete, onFetchDocs, docsLoading }) {
+function MachineCard({ machine: m, onEdit, onDelete }) {
   const [expanded, setExpanded] = useState(false);
   const photos = m.photos || (m.photo ? [{ url: m.photo, label: "Nameplate" }] : []);
   return (
@@ -1695,15 +1643,8 @@ function MachineCard({ machine: m, onEdit, onDelete, onFetchDocs, docsLoading })
         </div>
       )}
 
-      {expanded && m.docs && <DocsPanel docs={m.docs} fetchedAt={m.docsFetchedAt} />}
-
-      <div style={{ display:"flex",gap:6,marginTop:8,flexWrap:"wrap" }}>
+      <div style={{ display:"flex",gap:6,marginTop:8 }}>
         <button onClick={()=>setExpanded(e=>!e)} style={S.cGhost}>{expanded?"▲ Less":"▼ Details"}</button>
-        {onFetchDocs && (
-          <button onClick={onFetchDocs} disabled={docsLoading} style={{ ...S.cGhost,color:"#38bdf8",opacity:docsLoading?0.6:1 }}>
-            {docsLoading ? "⏳ Fetching..." : m.docs ? "📚 Refresh Docs" : "📚 Get Docs"}
-          </button>
-        )}
         <button onClick={onEdit} style={{ ...S.cGhost,color:"#7c3aed" }}>✏️ Edit</button>
         <button onClick={onDelete} style={{ ...S.cGhost,color:"#f87171",borderColor:"#f8717130" }}>✕</button>
       </div>
@@ -1711,83 +1652,11 @@ function MachineCard({ machine: m, onEdit, onDelete, onFetchDocs, docsLoading })
   );
 }
 
-// ─── DOCS PANEL — manuals, SOP, troubleshooting for one asset ───────────────
-function DocsPanel({ docs, fetchedAt }) {
-  const [tab, setTab] = useState("sop");
-  const links = docs.manualLinks?.filter(l => l && l.url) || [];
-  const sop = docs.sop || [];
-  const ts = docs.troubleshooting?.filter(t => t && (t.symptom || t.fix)) || [];
-  const safety = docs.safetyNotes || [];
-  const tabs = [
-    ["sop", `📋 SOP (${sop.length})`],
-    ["ts", `🔧 Troubleshoot (${ts.length})`],
-    ["manuals", `📖 Manuals (${links.length})`],
-    ["safety", `⚠️ Safety (${safety.length})`],
-  ];
-  return (
-    <div style={{ marginBottom:10,background:"rgba(56,189,248,0.06)",border:"1.5px solid rgba(56,189,248,0.25)",borderRadius:12,padding:12 }}>
-      {docs.summary && <div style={{ fontSize:12,color:"#475569",marginBottom:8 }}>{docs.summary}</div>}
-      <div style={{ display:"flex",gap:4,marginBottom:8,flexWrap:"wrap" }}>
-        {tabs.map(([k,label])=>(
-          <button key={k} onClick={()=>setTab(k)}
-            style={{ padding:"4px 10px",fontSize:10,fontWeight:700,borderRadius:8,cursor:"pointer",fontFamily:"inherit",
-              background: tab===k ? "rgba(56,189,248,0.18)" : "transparent",
-              border: tab===k ? "1px solid rgba(56,189,248,0.5)" : "1px solid rgba(148,163,184,0.25)",
-              color: tab===k ? "#0284c7" : "#64748b" }}>
-            {label}
-          </button>
-        ))}
-      </div>
-      {tab==="sop" && (sop.length
-        ? <ol style={{ margin:0,paddingLeft:18 }}>{sop.map((s,i)=><li key={i} style={{ fontSize:12,color:"#334155",marginBottom:4 }}>{s}</li>)}</ol>
-        : <div style={{ fontSize:12,color:"#94a3b8" }}>No SOP generated</div>)}
-      {tab==="ts" && (ts.length
-        ? ts.map((t,i)=>(
-            <div key={i} style={{ marginBottom:8,paddingBottom:8,borderBottom:i<ts.length-1?"1px solid rgba(148,163,184,0.15)":"none" }}>
-              <div style={{ fontSize:12,fontWeight:700,color:"#1e1b4b" }}>⚡ {t.symptom}</div>
-              {t.likelyCause && <div style={{ fontSize:11,color:"#64748b",marginTop:2 }}>Likely cause: {t.likelyCause}</div>}
-              {t.fix && <div style={{ fontSize:11,color:"#0284c7",marginTop:2 }}>Fix: {t.fix}</div>}
-            </div>))
-        : <div style={{ fontSize:12,color:"#94a3b8" }}>No troubleshooting entries</div>)}
-      {tab==="manuals" && (links.length
-        ? links.map((l,i)=>(
-            <a key={i} href={l.url} target="_blank" rel="noopener noreferrer"
-              style={{ display:"block",fontSize:12,color:"#0284c7",fontWeight:600,marginBottom:6,textDecoration:"none" }}>
-              🔗 {l.title || l.url}
-            </a>))
-        : <div style={{ fontSize:12,color:"#94a3b8" }}>No manual links found online — check the manufacturer's site with the model & serial number</div>)}
-      {tab==="safety" && (safety.length
-        ? <ul style={{ margin:0,paddingLeft:18 }}>{safety.map((s,i)=><li key={i} style={{ fontSize:12,color:"#b45309",marginBottom:4 }}>{s}</li>)}</ul>
-        : <div style={{ fontSize:12,color:"#94a3b8" }}>No safety notes</div>)}
-      {fetchedAt && <div style={{ fontSize:9,color:"#94a3b8",marginTop:6 }}>AI-generated {fmtDT(fetchedAt)} — verify against the official manual before critical work</div>}
-    </div>
-  );
-}
-
 // ─── GAUGE LOG TAB ───────────────────────────────────────────────────────────
-function GaugeLog({ gaugeLogs, setGaugeLogs, assets, machines, showToast }) {
+function GaugeLog({ gaugeLogs, setGaugeLogs, assets, showToast }) {
   const [scanning, setScanning] = useState(false);
   const [preview, setPreview]   = useState(null);
   const [editLog, setEditLog]   = useState(null);
-
-  // Every possible thing a reading can belong to: the original asset catalog
-  // (numeric ids) plus any machine scanned/created via the nameplate parser
-  // ("m"-prefixed ids so the two id spaces never collide).
-  const targets = useMemo(() => [
-    ...assets.map(a => ({ id: a.id, name: a.name, location: a.location })),
-    ...machines.map(m => ({ id: `m${m.id}`, name: m.name || `${m.make||""} ${m.model||""}`.trim() || "Unnamed machine", location: m.location })),
-  ], [assets, machines]);
-
-  const [selectedTargetId, setSelectedTargetId] = useState(() => load("cbv3_gaugeTarget", targets[0]?.id ?? null));
-  const [filterTargetId,   setFilterTargetId]   = useState("all");
-
-  useEffect(() => { save("cbv3_gaugeTarget", selectedTargetId); }, [selectedTargetId]);
-
-  const targetName = (id) => targets.find(t => String(t.id) === String(id))?.name || "Unassigned";
-
-  const visibleLogs = filterTargetId === "all"
-    ? gaugeLogs
-    : gaugeLogs.filter(l => String(l.assetId) === String(filterTargetId));
 
   const handleScan = useCallback(async (base64, dataUrl) => {
     setScanning(true);
@@ -1795,8 +1664,8 @@ function GaugeLog({ gaugeLogs, setGaugeLogs, assets, machines, showToast }) {
       const parsed = await aiParseImage(base64, GAUGE_PROMPT);
       if (!parsed) throw new Error();
       setPreview({ ...parsed, _photo: dataUrl, _ts: new Date().toISOString() });
-    } catch (err) {
-      showToast("⚠️ Gauge scan failed: " + (err?.message || "unknown error"));
+    } catch {
+      showToast("⚠️ Couldn't parse display — try manual entry");
     }
     setScanning(false);
   }, [showToast]);
@@ -1804,24 +1673,22 @@ function GaugeLog({ gaugeLogs, setGaugeLogs, assets, machines, showToast }) {
   const confirmLog = () => {
     if (!preview) return;
     const entry = {
-      id: Date.now(), assetId: selectedTargetId,
+      id: Date.now(), assetId: 11,
       timestamp: preview._ts,
       pressure: preview.pressure, temp: preview.temp,
       runHours: preview.runHours, loadHours: preview.loadHours,
       maintenanceIn: preview.maintenanceIn,
       status: preview.status || "On Load",
       keyMode: preview.keyMode || "",
-      warning: preview.warning || "",
       notes: "", photo: preview._photo, source: "photo"
     };
     setGaugeLogs(p=>[entry,...p]);
-    sheetsPost("logGauge", { ...entry, assetName: targetName(entry.assetId) });
+    sheetsPost("logGauge", { ...entry, assetName: assets.find(a=>a.id===entry.assetId)?.name || "" }, showToast);
     setPreview(null);
-    showToast(`✅ Gauge reading logged — ${targetName(entry.assetId)}`);
+    showToast("✅ Gauge reading logged");
   };
 
   const logFields = [
-    { key:"assetId", label:"Machine", type:"select", options: targets.map(t=>({ value:String(t.id), label: t.location?`${t.name} — ${t.location}`:t.name })) },
     { key:"timestamp", label:"Date/Time", type:"datetime-local" },
     { key:"pressure", label:"Pressure (psi)", type:"number" },
     { key:"temp", label:"Temperature (°F)", type:"number" },
@@ -1829,12 +1696,11 @@ function GaugeLog({ gaugeLogs, setGaugeLogs, assets, machines, showToast }) {
     { key:"loadHours", label:"Load Hours", type:"number" },
     { key:"maintenanceIn", label:"Maintenance In (h)", type:"number" },
     { key:"status", label:"Status", type:"select", options:["On Load","Off Load","Standby","Idle","Fault"] },
-    { key:"keyMode", label:"Key Mode", },
-    { key:"warning", label:"⚠️ Warning / Fault" },
+    { key:"keyMode", label:"Key Mode" },
     { key:"notes", label:"Notes", type:"textarea" },
   ];
 
-  const latest = gaugeLogs.find(l => String(l.assetId) === String(selectedTargetId)) || null;
+  const latest = gaugeLogs[0];
 
   return (
     <div>
@@ -1858,29 +1724,10 @@ function GaugeLog({ gaugeLogs, setGaugeLogs, assets, machines, showToast }) {
         ))}
       </div>
 
-      {/* MACHINE PICKER */}
-      <div style={{ marginBottom:14 }}>
-        <div style={{ fontSize:10,color:"#94a3b8",marginBottom:4,fontWeight:700 }}>📍 LOGGING FOR</div>
-        <select value={selectedTargetId||""} onChange={e=>setSelectedTargetId(e.target.value)}
-          style={{ ...S.inp, fontWeight:700, color:"#7c3aed" }}>
-          {targets.map(t=>(
-            <option key={t.id} value={t.id}>{t.location ? `${t.name} — ${t.location}` : t.name}</option>
-          ))}
-        </select>
-      </div>
-
-      {/* ACTIVE WARNING BANNER */}
-      {latest?.warning && (
-        <div style={{ background:"rgba(248,113,113,0.12)",border:"2px solid rgba(248,113,113,0.4)",borderRadius:14,padding:"12px 16px",marginBottom:16 }}>
-          <div style={{ fontWeight:800,color:"#dc2626",fontSize:13 }}>⚠️ Active Warning — {targetName(latest.assetId)}</div>
-          <div style={{ color:"#991b1b",fontSize:12,marginTop:2 }}>{latest.warning}</div>
-        </div>
-      )}
-
       {/* CONTROLS */}
       <div style={{ display:"flex",gap:10,marginBottom:20,flexWrap:"wrap" }}>
         <PhotoCapture onCapture={handleScan} label="📸 Scan Gauge Display" loading={scanning} />
-        <button onClick={()=>setEditLog({ id:Date.now(),assetId:selectedTargetId,timestamp:new Date().toISOString().slice(0,16),pressure:"",temp:"",runHours:"",loadHours:"",maintenanceIn:"",status:"On Load",keyMode:"",warning:"",notes:"",photo:null,source:"manual" })} style={{ padding:"12px 20px",background:"rgba(255,255,255,0.7)",border:"1.5px solid rgba(124,58,237,0.2)",borderRadius:12,color:"#7c3aed",fontWeight:700,fontSize:13,cursor:"pointer" }}>
+        <button onClick={()=>setEditLog({ id:Date.now(),assetId:11,timestamp:new Date().toISOString().slice(0,16),pressure:"",temp:"",runHours:"",loadHours:"",maintenanceIn:"",status:"On Load",keyMode:"",notes:"",photo:null,source:"manual" })} style={{ padding:"12px 20px",background:"rgba(255,255,255,0.7)",border:"1.5px solid rgba(124,58,237,0.2)",borderRadius:12,color:"#7c3aed",fontWeight:700,fontSize:13,cursor:"pointer" }}>
           ✍️ Manual Entry
         </button>
       </div>
@@ -1890,44 +1737,30 @@ function GaugeLog({ gaugeLogs, setGaugeLogs, assets, machines, showToast }) {
         <div style={{ background:"rgba(124,58,237,0.08)",border:"2px solid rgba(124,58,237,0.35)",borderRadius:16,padding:18,marginBottom:20 }}>
           <div style={{ fontWeight:800,color:"#7c3aed",marginBottom:10 }}>⚡ Parsed — Review & Confirm</div>
           <div style={{ display:"grid",gridTemplateColumns:"repeat(3,1fr)",gap:8,marginBottom:12 }}>
-            {[["Pressure",`${preview.pressure} psi`],["Temp",`${preview.temp}°F`],["Status",preview.status],["Run Hrs",`${preview.runHours?.toLocaleString()}h`],["Load Hrs",`${preview.loadHours?.toLocaleString()}h`],["Maint In",`${preview.maintenanceIn}h`],["Key Mode",preview.keyMode]].map(([k,v])=>(
+            {[["Pressure",`${preview.pressure} psi`],["Temp",`${preview.temp}°F`],["Status",preview.status],["Run Hrs",`${preview.runHours?.toLocaleString()}h`],["Load Hrs",`${preview.loadHours?.toLocaleString()}h`],["Maint In",`${preview.maintenanceIn}h`]].map(([k,v])=>(
               <div key={k} style={{ background:"rgba(255,255,255,0.5)",borderRadius:8,padding:"8px 10px" }}>
                 <div style={{ color:"#94a3b8",fontSize:9 }}>{k}</div>
                 <div style={{ color:"#1e1b4b",fontWeight:700,fontSize:13 }}>{v||"—"}</div>
               </div>
             ))}
           </div>
-          {preview.warning && (
-            <div style={{ background:"rgba(248,113,113,0.12)",border:"1.5px solid rgba(248,113,113,0.4)",borderRadius:8,padding:"8px 10px",marginBottom:12 }}>
-              <div style={{ color:"#dc2626",fontSize:9,fontWeight:700 }}>⚠️ WARNING DETECTED</div>
-              <div style={{ color:"#991b1b",fontWeight:700,fontSize:13 }}>{preview.warning}</div>
-            </div>
-          )}
           {preview._photo && <img src={preview._photo} alt="gauge" style={{ width:"100%",maxHeight:100,objectFit:"cover",borderRadius:8,marginBottom:12,opacity:0.85 }} />}
           <div style={{ display:"flex",gap:8 }}>
             <button onClick={confirmLog} style={{ flex:1,background:"#10b981",border:"none",borderRadius:10,color:"#fff",padding:"10px 0",fontWeight:700,cursor:"pointer" }}>✅ Log It</button>
-            <button onClick={()=>{ const e={...preview,id:Date.now(),assetId:selectedTargetId,timestamp:preview._ts,photo:preview._photo,source:"photo",notes:""}; setEditLog(e); setPreview(null); }} style={{ flex:1,background:"rgba(124,58,237,0.15)",border:"1px solid #7c3aed",borderRadius:10,color:"#7c3aed",padding:"10px 0",cursor:"pointer" }}>✏️ Edit</button>
+            <button onClick={()=>{ const e={...preview,id:Date.now(),assetId:11,timestamp:preview._ts,photo:preview._photo,source:"photo",notes:""}; setEditLog(e); setPreview(null); }} style={{ flex:1,background:"rgba(124,58,237,0.15)",border:"1px solid #7c3aed",borderRadius:10,color:"#7c3aed",padding:"10px 0",cursor:"pointer" }}>✏️ Edit</button>
             <button onClick={()=>setPreview(null)} style={{ background:"rgba(248,113,113,0.1)",border:"1px solid #f87171",borderRadius:10,color:"#f87171",padding:"10px 14px",cursor:"pointer" }}>✕</button>
           </div>
         </div>
       )}
 
       {/* LOG LIST */}
-      <div style={{ display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:12,flexWrap:"wrap",gap:8 }}>
-        <div style={{ fontSize:11,color:"#94a3b8" }}>{visibleLogs.length} reading{visibleLogs.length!==1?"s":""} logged</div>
-        <select value={filterTargetId} onChange={e=>setFilterTargetId(e.target.value)}
-          style={{ ...S.inp, width:"auto", fontSize:11, padding:"6px 10px" }}>
-          <option value="all">Show: All Machines</option>
-          {targets.map(t=><option key={t.id} value={t.id}>Show: {t.name}</option>)}
-        </select>
-      </div>
-      {visibleLogs.map(log=>(
+      <div style={{ fontSize:11,color:"#94a3b8",marginBottom:12 }}>{gaugeLogs.length} reading{gaugeLogs.length!==1?"s":""} logged · Kaeser Compressor-01</div>
+      {gaugeLogs.map(log=>(
         <div key={log.id} style={{ background:"rgba(255,255,255,0.65)",border:"1.5px solid rgba(124,58,237,0.1)",borderRadius:16,padding:16,marginBottom:10,backdropFilter:"blur(20px)" }}>
           <div style={{ display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:10 }}>
             <div>
               <div style={{ fontWeight:700,fontSize:13,color:"#1e1b4b" }}>{fmtDT(log.timestamp)}</div>
-              <div style={{ display:"flex",gap:6,marginTop:4,flexWrap:"wrap" }}>
-                <Badge label={targetName(log.assetId)} color="#0284c7" />
+              <div style={{ display:"flex",gap:6,marginTop:4 }}>
                 <Badge label={log.source||"manual"} />
                 {log.status && <Badge label={log.status} color="#7c3aed" />}
               </div>
@@ -1937,12 +1770,6 @@ function GaugeLog({ gaugeLogs, setGaugeLogs, assets, machines, showToast }) {
               <button onClick={()=>{ setGaugeLogs(p=>p.filter(x=>x.id!==log.id)); showToast("🗑 Log removed"); }} style={{ padding:"4px 10px",background:"rgba(248,113,113,0.1)",border:"1px solid rgba(248,113,113,0.3)",borderRadius:6,color:"#f87171",fontSize:11,cursor:"pointer" }}>🗑</button>
             </div>
           </div>
-          {log.warning && (
-            <div style={{ background:"rgba(248,113,113,0.1)",border:"1px solid rgba(248,113,113,0.35)",borderRadius:8,padding:"7px 10px",marginBottom:8 }}>
-              <div style={{ color:"#dc2626",fontSize:9,fontWeight:700 }}>⚠️ WARNING</div>
-              <div style={{ color:"#991b1b",fontWeight:700,fontSize:13 }}>{log.warning}</div>
-            </div>
-          )}
           <div style={{ display:"grid",gridTemplateColumns:"repeat(3,1fr)",gap:8 }}>
             {[
               { k:"Pressure", v:log.pressure?`${log.pressure} psi`:null, alert:log.pressure>120 },
@@ -2523,7 +2350,7 @@ export default function App() {
   const [assetPhotos, setAssetPhotos] = useState(() => load("cbv3_assetPhotos", {}));
   const [watchModal, setWatchModal]   = useState(null); // asset to add to watch list
   const [photoModal, setPhotoModal]   = useState(null); // asset to add photos to
-  const [repairModal, setRepairModal] = useState(false); // repair modal open/closed
+  const [repairModal, setRepairModal] = useState(false); // inline Log Repair modal (search/create asset)
 
   useEffect(() => { save("cbv3_assets",    assets);    }, [assets]);
   useEffect(() => { save("cbv3_logs",      logs);      }, [logs]);
@@ -2559,7 +2386,7 @@ export default function App() {
   function doLog() {
     const newLog = { id:Date.now(), assetId:logModal.id, date:logDate, note:logNote, tech:"CB" };
     setLogs(p=>[...p, newLog]);
-    sheetsPost("logWorkOrder", { ...newLog, assetName: logModal.name });
+    sheetsPost("logWorkOrder", { ...newLog, assetName: logModal.name }, showToast);
     showToast(`✓ Logged: ${logModal.name}`);
     setLog(null); setNote(""); setDate(TODAY);
   }
@@ -2572,14 +2399,16 @@ export default function App() {
     setForm({ name:"",location:"",category:"Filter",detail:"",intervalDays:30,pmEnabled:true });
   }
 
-  function dismissAsset(id) { setAssets(p=>p.map(a=>a.id===id?{...a,dismissed:!a.dismissed}:a)); }
-  function deleteAsset(id)  { setAssets(p=>p.filter(a=>a.id!==id)); setLogs(p=>p.filter(l=>l.assetId!==id)); showToast("Asset permanently deleted"); }
+  function dismissAsset(id) { setAssets(p=>(Array.isArray(p)?p:[]).map(a=>a.id===id?{...a,dismissed:!a.dismissed}:a)); }
+  function deleteAsset(id)  { setAssets(p=>(Array.isArray(p)?p:[]).filter(a=>a.id!==id)); setLogs(p=>(Array.isArray(p)?p:[]).filter(l=>l.assetId!==id)); showToast("Asset permanently deleted"); }
 
-  const enriched = assets.map(a=>({...a,pm:getPM(a,logs)}));
+  const safeAssets = Array.isArray(assets) ? assets : [];
+  const safeLogs   = Array.isArray(logs) ? logs : [];
+  const enriched = safeAssets.map(a=>({...a,pm:getPM(a,safeLogs)}));
   const overdue  = enriched.filter(a=>a.pm.label==="Overdue"||a.pm.label==="Never logged");
   const dueSoon  = enriched.filter(a=>a.pm.label==="Due soon");
   const ok       = enriched.filter(a=>a.pm.label==="OK");
-  const cats     = ["All",...Array.from(new Set(assets.map(a=>a.category)))];
+  const cats     = ["All",...Array.from(new Set(safeAssets.map(a=>a.category)))];
   const sorted   = [...enriched].sort((a,b)=>{ const o={"Never logged":0,"Overdue":1,"Due soon":2,"OK":3,"Log only":4}; return o[a.pm.label]-o[b.pm.label]; });
   const visibleSorted = showHidden ? sorted : sorted.filter(a=>!a.dismissed);
   const displayed = catFilter==="All" ? visibleSorted : visibleSorted.filter(a=>a.category===catFilter);
@@ -2602,7 +2431,6 @@ export default function App() {
     ["gauge",      "⚡ Gauge Log"],
     ["history",    "PM History"],
     ["worklog",    "📋 Daily Log"],
-    ["assistant",  "💬 Assistant"],
     ["add",        "+ Add Asset"],
   ];
 
@@ -2707,7 +2535,7 @@ export default function App() {
               id: newLog.id, assetId: pmTaskModal.id, assetName: pmTaskModal.name,
               date: TODAY, tech: "CB", tasksCompleted: checkedCount,
               totalTasks, note, photoUrl
-            });
+            }, showToast);
             showToast(`✅ PM logged for ${pmTaskModal.name}`);
             setPMTask(null);
           }}
@@ -2882,6 +2710,19 @@ export default function App() {
               )}
             </div>
             <div style={S.grid}>
+              {displayed.length===0 && (
+                <div style={{ gridColumn:"1/-1", textAlign:"center", padding:"40px 20px", color:"#94a3b8" }}>
+                  <div style={{ fontSize:32, marginBottom:12 }}>🔧</div>
+                  <div style={{ fontWeight:700, fontSize:15, color:"#1e1b4b", marginBottom:6 }}>
+                    {catFilter==="All" ? "No assets yet" : `No assets in "${catFilter}"`}
+                  </div>
+                  <div style={{ fontSize:13 }}>
+                    {catFilter==="All"
+                      ? <>Tap <strong style={{color:"#6366f1"}}>+ Add Asset</strong> to get started, or use the nameplate scanner to pull one in from a photo.</>
+                      : <>Try a different category filter, or tap <strong style={{color:"#6366f1"}}>All</strong> to see everything.</>}
+                  </div>
+                </div>
+              )}
               {displayed.map(a=>(
                 <AssetCard key={a.id} asset={a}
                   dismissed={!!a.dismissed}
@@ -2916,24 +2757,12 @@ export default function App() {
 
         {/* GAUGE LOG TAB */}
         {tab==="gauge" && (
-          <GaugeLog gaugeLogs={gaugeLogs} setGaugeLogs={setGaugeLogs} assets={assets} machines={machines} showToast={showToast} />
+          <GaugeLog gaugeLogs={gaugeLogs} setGaugeLogs={setGaugeLogs} assets={assets} showToast={showToast} />
         )}
 
         {/* DAILY WORK LOG */}
         {tab==="worklog" && (
           <DailyWorkLog workEntries={workEntries} setWorkEntries={setWorkEntries} showToast={showToast} />
-        )}
-
-        {/* SHOP ASSISTANT */}
-        {tab==="assistant" && (
-          <ShopAssistant
-            assets={assets}
-            logs={logs}
-            machines={machines}
-            watchItems={watchItems}
-            gaugeLogs={gaugeLogs}
-            workEntries={workEntries}
-          />
         )}
 
         {/* FACILITY MAP */}
@@ -3373,7 +3202,7 @@ function DailyWorkLog({ workEntries, setWorkEntries, showToast }) {
       tech: "CB",
     };
     setWorkEntries(p => [entry, ...p]);
-    sheetsPost("logDaily", entry);
+    sheetsPost("logDaily", entry, showToast);
     setText("");
     showToast("✅ Logged");
     textRef.current?.focus();
@@ -3538,211 +3367,6 @@ function DailyWorkLog({ workEntries, setWorkEntries, showToast }) {
           </div>
         </div>
       )}
-    </div>
-  );
-}
-
-// ─── SHOP ASSISTANT ──────────────────────────────────────────────────────────
-// Facility-aware Q&A. Every question ships with a compact snapshot of the
-// live portal data (assets, PM status, machines, watch list, recent logs) so
-// answers are about THIS shop, not generic advice. Calls /api/ai directly
-// (not aiCall — that helper force-parses JSON; chat needs plain text).
-
-function buildFacilityContext({ assets, logs, machines, watchItems, gaugeLogs, workEntries }) {
-  const lines = ["FACILITY: I&M Machine & Fabrication Corp — St. Joseph, MO (metal fab, CNC, powder coat)"];
-
-  const enriched = (assets || []).map(a => ({ ...a, pm: getPM(a, logs || []) }));
-  if (enriched.length) {
-    lines.push("\nASSETS / PM STATUS:");
-    enriched.forEach(a =>
-      lines.push(`- ${a.name} | ${a.location || "?"} | ${a.category} | PM: ${a.pm.label}${a.pm.days != null ? ` (${a.pm.days}d)` : ""}${a.detail ? ` | ${a.detail}` : ""}`)
-    );
-  }
-
-  if ((machines || []).length) {
-    lines.push("\nMACHINE DATABASE:");
-    machines.forEach(m =>
-      lines.push(`- ${m.name || m.model || "Unknown"}${m.make ? ` | ${m.make}` : ""}${m.model ? ` ${m.model}` : ""}${m.serial ? ` | SN ${m.serial}` : ""}${m.notes ? ` | ${m.notes}` : ""}`)
-    );
-  }
-
-  const openWatch = (watchItems || []).filter(w => !w.resolved);
-  if (openWatch.length) {
-    lines.push("\nWATCH LIST (open issues):");
-    openWatch.forEach(w =>
-      lines.push(`- ${w.assetName || w.name || "?"}: ${w.issue || w.note || w.detail || ""}${w.severity ? ` [${w.severity}]` : ""}`)
-    );
-  }
-
-  const recentLogs = [...(logs || [])].sort((a, b) => new Date(b.date) - new Date(a.date)).slice(0, 15);
-  if (recentLogs.length) {
-    lines.push("\nRECENT PM / REPAIR LOGS:");
-    recentLogs.forEach(l => {
-      const a = (assets || []).find(x => x.id === l.assetId);
-      lines.push(`- ${l.date} | ${a ? a.name : "asset " + l.assetId} | ${l.note || "PM completed"}`);
-    });
-  }
-
-  const recentGauge = [...(gaugeLogs || [])].slice(-8);
-  if (recentGauge.length) {
-    lines.push("\nRECENT GAUGE READINGS:");
-    recentGauge.forEach(g =>
-      lines.push(`- ${g.date || g.timestamp || ""} | ${g.assetName || g.asset || ""} | ${g.reading || g.value || ""} ${g.notes || g.fault || ""}`)
-    );
-  }
-
-  const recentWork = [...(workEntries || [])].sort((a, b) => new Date(b.date) - new Date(a.date)).slice(0, 10);
-  if (recentWork.length) {
-    lines.push("\nRECENT DAILY WORK LOG:");
-    recentWork.forEach(e => lines.push(`- ${e.date} | ${e.tag || ""} | ${e.text || ""}`));
-  }
-
-  return lines.join("\n");
-}
-
-function ShopAssistant({ assets, logs, machines, watchItems, gaugeLogs, workEntries }) {
-  const [messages, setMessages] = useState(() => load("cbv3_chatHistory", []));
-  const [input, setInput]       = useState("");
-  const [busy, setBusy]         = useState(false);
-  const [docsMode, setDocsMode] = useState(false);
-  const [err, setErr]           = useState(null);
-  const scrollRef = useRef(null);
-
-  useEffect(() => { save("cbv3_chatHistory", messages.slice(-40)); }, [messages]);
-  useEffect(() => {
-    if (scrollRef.current) scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
-  }, [messages, busy]);
-
-  async function send() {
-    const q = input.trim();
-    if (!q || busy) return;
-    setErr(null);
-    const nextMsgs = [...messages, { role: "user", text: q, ts: Date.now() }];
-    setMessages(nextMsgs);
-    setInput("");
-    setBusy(true);
-
-    const context = buildFacilityContext({ assets, logs, machines, watchItems, gaugeLogs, workEntries });
-    const transcript = nextMsgs.slice(-10)
-      .map(m => `${m.role === "user" ? "TECH" : "ASSISTANT"}: ${m.text}`)
-      .join("\n");
-
-    const prompt = `You are Shop Assistant, built into the maintenance portal at I&M Machine & Fabrication. You help the maintenance technician (CB) with equipment questions, troubleshooting, PM planning, and prioritization.
-
-RULES:
-- Answer using the FACILITY DATA below first. Reference specific machines, watch items, and log history by name when relevant.
-- If the data doesn't cover it, use general industrial maintenance knowledge and say you're going off general knowledge.
-- Be concise and practical — short answers, plain language, steps when troubleshooting.
-- Always flag safety concerns (lockout/tagout, electrical, hydraulic pressure, lifting) when the task calls for it.
-- Never invent readings, dates, or history that isn't in the data.
-
-${context}
-
-CONVERSATION:
-${transcript}
-
-Respond to the technician's last message. Plain text only, no markdown headers.`;
-
-    try {
-      const resp = await fetch("/api/ai", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ prompt, useWebSearch: docsMode, maxTokens: 1500 }),
-      });
-      let data = null;
-      try { data = await resp.json(); } catch { /* non-JSON */ }
-      if (!resp.ok || !data || typeof data.text !== "string") {
-        throw new Error(data?.error || `Request failed (HTTP ${resp.status})`);
-      }
-      setMessages(p => [...p, { role: "assistant", text: data.text.trim(), ts: Date.now() }]);
-    } catch (e) {
-      setErr(e.message);
-      setMessages(p => [...p, { role: "assistant", text: "⚠️ " + e.message, ts: Date.now(), error: true }]);
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  const openWatchCount = (watchItems || []).filter(w => !w.resolved).length;
-
-  return (
-    <div style={S.glassPanel}>
-      <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", flexWrap:"wrap", gap:10, marginBottom:14 }}>
-        <div>
-          <div style={S.secLabel}>Shop Assistant</div>
-          <div style={{ fontSize:12, color:"#94a3b8", marginTop:-8 }}>
-            Knows {(assets||[]).length} assets · {(machines||[]).length} machines · {openWatchCount} open watch items
-          </div>
-        </div>
-        <div style={{ display:"flex", gap:10, alignItems:"center" }}>
-          <label style={{ display:"flex", alignItems:"center", gap:6, fontSize:12, color: docsMode ? "#7c3aed" : "#94a3b8", cursor:"pointer", fontWeight: docsMode ? 700 : 500 }}>
-            <input type="checkbox" checked={docsMode} onChange={e=>setDocsMode(e.target.checked)} />
-            🌐 Docs lookup
-          </label>
-          {messages.length > 0 && (
-            <button
-              onClick={() => { setMessages([]); save("cbv3_chatHistory", []); }}
-              style={{ ...S.catBtn, fontSize:11 }}>
-              Clear
-            </button>
-          )}
-        </div>
-      </div>
-
-      <div ref={scrollRef} style={{
-        maxHeight:"52vh", minHeight:220, overflowY:"auto",
-        background:"rgba(124,58,237,0.03)", border:"1px solid rgba(124,58,237,0.08)",
-        borderRadius:16, padding:16, marginBottom:12,
-        display:"flex", flexDirection:"column", gap:10
-      }}>
-        {messages.length === 0 && (
-          <div style={{ color:"#94a3b8", fontSize:13, lineHeight:1.7 }}>
-            Ask about anything on the floor. Try:
-            <div style={{ display:"flex", flexWrap:"wrap", gap:8, marginTop:10 }}>
-              {["What's open on the watch list?",
-                "What PM is overdue right now?",
-                "Kaeser compressor threw E403 again — walk me through it",
-                "What should I hit first today?"].map(s => (
-                <button key={s} onClick={()=>setInput(s)} style={{ ...S.catBtn, fontSize:11 }}>{s}</button>
-              ))}
-            </div>
-          </div>
-        )}
-        {messages.map((m, i) => (
-          <div key={m.ts + "-" + i} style={{
-            alignSelf: m.role === "user" ? "flex-end" : "flex-start",
-            maxWidth:"85%",
-            background: m.role === "user" ? "rgba(124,58,237,0.12)" : (m.error ? "rgba(248,113,113,0.08)" : "rgba(255,255,255,0.85)"),
-            border: m.role === "user" ? "1px solid rgba(124,58,237,0.25)" : (m.error ? "1px solid rgba(248,113,113,0.25)" : "1px solid rgba(124,58,237,0.1)"),
-            color:"#1e1b4b", borderRadius:14, padding:"10px 14px",
-            fontSize:13.5, lineHeight:1.55, whiteSpace:"pre-wrap", wordBreak:"break-word"
-          }}>
-            {m.text}
-          </div>
-        ))}
-        {busy && (
-          <div style={{ alignSelf:"flex-start", color:"#7c3aed", fontSize:13, fontWeight:600, padding:"6px 4px" }}>
-            {docsMode ? "Checking docs…" : "Thinking…"}
-          </div>
-        )}
-      </div>
-
-      {err && <div style={{ color:"#f87171", fontSize:12, marginBottom:8 }}>Last request failed: {err}</div>}
-
-      <div style={{ display:"flex", gap:8 }}>
-        <input
-          style={{ ...S.inp, flex:1 }}
-          value={input}
-          onChange={e=>setInput(e.target.value)}
-          onKeyDown={e=>{ if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); } }}
-          placeholder="Ask about a machine, fault code, PM, or what to prioritize…"
-          disabled={busy}
-        />
-        <button onClick={send} disabled={busy || !input.trim()}
-          style={{ ...S.btnP, flex:"0 0 auto", padding:"11px 22px", opacity: busy || !input.trim() ? 0.5 : 1 }}>
-          {busy ? "…" : "Send"}
-        </button>
-      </div>
     </div>
   );
 }
