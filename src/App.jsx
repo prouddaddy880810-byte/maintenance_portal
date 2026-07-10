@@ -690,8 +690,50 @@ function pushCloudState(key, value, onSyncError) {
   if (!SYNC_KEYS.includes(key)) return;
   clearTimeout(_pushTimers[key]);
   _pushTimers[key] = setTimeout(() => {
-    sheetsPost("saveState", { key, value, updatedAt: Date.now() }, onSyncError);
+    sheetsPost("saveState", { key, value: sanitizeForCloud(key, value), updatedAt: Date.now() }, onSyncError);
   }, 1500);
+}
+
+// Never push raw base64 photos to the Sheet — they bloat the State tab and
+// slow every sync. Drive URLs (small strings) pass through fine.
+function sanitizeForCloud(key, value) {
+  if (!Array.isArray(value)) return value;
+  return value.map(item => {
+    if (item && typeof item.photo === "string" && item.photo.startsWith("data:")) {
+      return { ...item, photo: null };
+    }
+    return item;
+  });
+}
+
+// ─── PHOTO → DRIVE ───────────────────────────────────────────────────────────
+// Shrinks the image client-side, uploads via Apps Script to a Drive folder,
+// returns a small shareable URL that syncs across devices.
+function resizeImage(dataUrl, maxDim = 1000, quality = 0.7) {
+  return new Promise((resolve) => {
+    const img = new Image();
+    img.onload = () => {
+      const scale = Math.min(1, maxDim / Math.max(img.width, img.height));
+      const canvas = document.createElement("canvas");
+      canvas.width  = Math.round(img.width * scale);
+      canvas.height = Math.round(img.height * scale);
+      canvas.getContext("2d").drawImage(img, 0, 0, canvas.width, canvas.height);
+      resolve(canvas.toDataURL("image/jpeg", quality));
+    };
+    img.onerror = () => resolve(dataUrl); // fall back to original
+    img.src = dataUrl;
+  });
+}
+
+async function uploadPhotoToDrive(dataUrl, name) {
+  try {
+    const resized = await resizeImage(dataUrl);
+    const base64 = resized.split(",")[1];
+    const result = await sheetsPost("uploadPhoto", { base64, mimeType: "image/jpeg", name: name || `photo_${Date.now()}` });
+    return result?.success && result?.url ? result.url : null;
+  } catch {
+    return null;
+  }
 }
 
 function fromStr(s)  { return new Date(s+"T00:00:00"); }
@@ -1705,9 +1747,29 @@ function GaugeLog({ gaugeLogs, setGaugeLogs, assets, showToast }) {
       notes: "", photo: preview._photo, source: "photo"
     };
     setGaugeLogs(p=>[entry,...p]);
-    sheetsPost("logGauge", { ...entry, assetName: assets.find(a=>a.id===entry.assetId)?.name || "" }, showToast);
+    sheetsPost("logGauge", { ...entry, photo: undefined, assetName: assets.find(a=>a.id===entry.assetId)?.name || "" }, showToast);
     setPreview(null);
     showToast("✅ Gauge reading logged");
+    // Background: push photo to Drive, then swap base64 → URL so it syncs everywhere
+    if (entry.photo) {
+      uploadPhotoToDrive(entry.photo, `gauge_${entry.id}`).then(url => {
+        if (url) setGaugeLogs(p => p.map(l => l.id === entry.id ? { ...l, photo: url } : l));
+      });
+    }
+  };
+
+  const attachPhoto = (logId, dataUrl) => {
+    // Show instantly from local, then swap for the synced Drive URL
+    setGaugeLogs(p => p.map(l => l.id === logId ? { ...l, photo: dataUrl } : l));
+    showToast("📤 Uploading photo…");
+    uploadPhotoToDrive(dataUrl, `gauge_${logId}`).then(url => {
+      if (url) {
+        setGaugeLogs(p => p.map(l => l.id === logId ? { ...l, photo: url } : l));
+        showToast("✅ Photo saved to Drive — synced");
+      } else {
+        showToast("⚠️ Drive upload failed — photo saved on this device only");
+      }
+    });
   };
 
   const logFields = [
@@ -1788,6 +1850,11 @@ function GaugeLog({ gaugeLogs, setGaugeLogs, assets, showToast }) {
               </div>
             </div>
             <div style={{ display:"flex",gap:6 }}>
+              <label style={{ padding:"4px 10px",background:"rgba(16,185,129,0.1)",border:"1px solid rgba(16,185,129,0.3)",borderRadius:6,color:"#10b981",fontSize:11,cursor:"pointer" }}>
+                📷 {log.photo ? "Replace" : "Photo"}
+                <input type="file" accept="image/*" capture="environment" style={{ display:"none" }}
+                  onChange={e=>{ const f=e.target.files?.[0]; if(!f)return; const r=new FileReader(); r.onload=ev=>attachPhoto(log.id, ev.target.result); r.readAsDataURL(f); e.target.value=""; }} />
+              </label>
               <button onClick={()=>setEditLog(log)} style={{ padding:"4px 10px",background:"rgba(124,58,237,0.1)",border:"1px solid rgba(124,58,237,0.3)",borderRadius:6,color:"#7c3aed",fontSize:11,cursor:"pointer" }}>✏️ Edit</button>
               <button onClick={()=>{ setGaugeLogs(p=>p.filter(x=>x.id!==log.id)); showToast("🗑 Log removed"); }} style={{ padding:"4px 10px",background:"rgba(248,113,113,0.1)",border:"1px solid rgba(248,113,113,0.3)",borderRadius:6,color:"#f87171",fontSize:11,cursor:"pointer" }}>🗑</button>
             </div>

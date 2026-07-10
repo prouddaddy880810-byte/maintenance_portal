@@ -5,7 +5,8 @@
  * 1. Open your existing Apps Script project (the one deployed at your /exec URL)
  * 2. Add this file's contents as a new script file (File > New > Script: "state-sync")
  * 3. In your existing doPost(e) switch/if-chain, add:
- *        if (action === "saveState") return handleSaveState_(payload.data);
+ *        if (action === "saveState")   return handleSaveState_(payload.data);
+ *        if (action === "uploadPhoto") return handleUploadPhoto_(payload.data);
  * 4. Add (or merge into) a doGet(e):
  *        function doGet(e) {
  *          if (e.parameter.action === "getState") return handleGetState_();
@@ -101,5 +102,35 @@ function handleSaveState_(data) {
     return json_({ success: true, key: data.key, updatedAt: incomingTs, chunks: chunks.length });
   } finally {
     lock.releaseLock();
+  }
+}
+
+// ─── PHOTO UPLOAD → DRIVE ────────────────────────────────────────────────────
+// POST { action:"uploadPhoto", data:{ base64, mimeType, name } }
+// Saves into a "Maintenance Portal Photos" Drive folder and returns an
+// embeddable URL that works in <img> tags on any device.
+
+var PHOTO_FOLDER_NAME = "Maintenance Portal Photos";
+
+function getPhotoFolder_() {
+  var it = DriveApp.getFoldersByName(PHOTO_FOLDER_NAME);
+  return it.hasNext() ? it.next() : DriveApp.createFolder(PHOTO_FOLDER_NAME);
+}
+
+function handleUploadPhoto_(data) {
+  if (!data || !data.base64) return json_({ success: false, error: "missing base64" });
+  try {
+    var blob = Utilities.newBlob(
+      Utilities.base64Decode(data.base64),
+      data.mimeType || "image/jpeg",
+      (data.name || "photo_" + Date.now()) + ".jpg"
+    );
+    var file = getPhotoFolder_().createFile(blob);
+    file.setSharing(DriveApp.Access.ANYONE_WITH_LINK, DriveApp.Permission.VIEW);
+    // thumbnail endpoint renders reliably inside <img> tags (uc?export=view does not)
+    var url = "https://drive.google.com/thumbnail?id=" + file.getId() + "&sz=w1000";
+    return json_({ success: true, url: url, fileId: file.getId() });
+  } catch (err) {
+    return json_({ success: false, error: String(err) });
   }
 }
