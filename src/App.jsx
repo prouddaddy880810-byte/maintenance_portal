@@ -1722,6 +1722,16 @@ function GaugeLog({ gaugeLogs, setGaugeLogs, assets, showToast }) {
   const [preview, setPreview]   = useState(null);
   const [editLog, setEditLog]   = useState(null);
 
+  // Compressors (or any equipment with a gauge display) selectable for logging.
+  const gaugeAssets = assets.filter(a => /compressor/i.test(a.name || ""));
+  const pickList = gaugeAssets.length ? gaugeAssets : assets;
+  const [selectedAssetId, setSelectedAssetId] = useState(() => {
+    const saved = Number(localStorage.getItem("cbv3_gaugeAsset"));
+    return saved || pickList[0]?.id || 11;
+  });
+  const selectAsset = (id) => { setSelectedAssetId(id); localStorage.setItem("cbv3_gaugeAsset", String(id)); };
+  const selectedAsset = assets.find(a => a.id === selectedAssetId);
+
   const handleScan = useCallback(async (base64, dataUrl) => {
     setScanning(true);
     try {
@@ -1737,7 +1747,7 @@ function GaugeLog({ gaugeLogs, setGaugeLogs, assets, showToast }) {
   const confirmLog = () => {
     if (!preview) return;
     const entry = {
-      id: Date.now(), assetId: 11,
+      id: Date.now(), assetId: selectedAssetId,
       timestamp: preview._ts,
       pressure: preview.pressure, temp: preview.temp,
       runHours: preview.runHours, loadHours: preview.loadHours,
@@ -1784,7 +1794,9 @@ function GaugeLog({ gaugeLogs, setGaugeLogs, assets, showToast }) {
     { key:"notes", label:"Notes", type:"textarea" },
   ];
 
-  const latest = gaugeLogs[0];
+  // Old readings pre-selector defaulted to Kaeser (11)
+  const shownLogs = gaugeLogs.filter(l => (l.assetId ?? 11) === selectedAssetId);
+  const latest = shownLogs[0];
 
   return (
     <div>
@@ -1808,10 +1820,21 @@ function GaugeLog({ gaugeLogs, setGaugeLogs, assets, showToast }) {
         ))}
       </div>
 
+      {/* ASSET SELECTOR */}
+      <div style={{ marginBottom:14 }}>
+        <div style={{ fontSize:10,color:"#94a3b8",marginBottom:5,fontWeight:700,letterSpacing:0.5 }}>LOGGING TO</div>
+        <select value={selectedAssetId} onChange={e=>selectAsset(Number(e.target.value))}
+          style={{ width:"100%",padding:"12px 14px",background:"rgba(255,255,255,0.8)",border:"1.5px solid rgba(124,58,237,0.3)",borderRadius:12,color:"#1e1b4b",fontWeight:700,fontSize:14,cursor:"pointer" }}>
+          {pickList.map(a=>(
+            <option key={a.id} value={a.id}>{a.name}{a.location?` — ${a.location}`:""}</option>
+          ))}
+        </select>
+      </div>
+
       {/* CONTROLS */}
       <div style={{ display:"flex",gap:10,marginBottom:20,flexWrap:"wrap" }}>
         <PhotoCapture onCapture={handleScan} label="📸 Scan Gauge Display" loading={scanning} />
-        <button onClick={()=>setEditLog({ id:Date.now(),assetId:11,timestamp:new Date().toISOString().slice(0,16),pressure:"",temp:"",runHours:"",loadHours:"",maintenanceIn:"",status:"On Load",keyMode:"",notes:"",photo:null,source:"manual" })} style={{ padding:"12px 20px",background:"rgba(255,255,255,0.7)",border:"1.5px solid rgba(124,58,237,0.2)",borderRadius:12,color:"#7c3aed",fontWeight:700,fontSize:13,cursor:"pointer" }}>
+        <button onClick={()=>setEditLog({ id:Date.now(),assetId:selectedAssetId,timestamp:new Date().toISOString().slice(0,16),pressure:"",temp:"",runHours:"",loadHours:"",maintenanceIn:"",status:"On Load",keyMode:"",notes:"",photo:null,source:"manual" })} style={{ padding:"12px 20px",background:"rgba(255,255,255,0.7)",border:"1.5px solid rgba(124,58,237,0.2)",borderRadius:12,color:"#7c3aed",fontWeight:700,fontSize:13,cursor:"pointer" }}>
           ✍️ Manual Entry
         </button>
       </div>
@@ -1831,15 +1854,15 @@ function GaugeLog({ gaugeLogs, setGaugeLogs, assets, showToast }) {
           {preview._photo && <img src={preview._photo} alt="gauge" style={{ width:"100%",maxHeight:100,objectFit:"cover",borderRadius:8,marginBottom:12,opacity:0.85 }} />}
           <div style={{ display:"flex",gap:8 }}>
             <button onClick={confirmLog} style={{ flex:1,background:"#10b981",border:"none",borderRadius:10,color:"#fff",padding:"10px 0",fontWeight:700,cursor:"pointer" }}>✅ Log It</button>
-            <button onClick={()=>{ const e={...preview,id:Date.now(),assetId:11,timestamp:preview._ts,photo:preview._photo,source:"photo",notes:""}; setEditLog(e); setPreview(null); }} style={{ flex:1,background:"rgba(124,58,237,0.15)",border:"1px solid #7c3aed",borderRadius:10,color:"#7c3aed",padding:"10px 0",cursor:"pointer" }}>✏️ Edit</button>
+            <button onClick={()=>{ const e={...preview,id:Date.now(),assetId:selectedAssetId,timestamp:preview._ts,photo:preview._photo,source:"photo",notes:""}; setEditLog(e); setPreview(null); }} style={{ flex:1,background:"rgba(124,58,237,0.15)",border:"1px solid #7c3aed",borderRadius:10,color:"#7c3aed",padding:"10px 0",cursor:"pointer" }}>✏️ Edit</button>
             <button onClick={()=>setPreview(null)} style={{ background:"rgba(248,113,113,0.1)",border:"1px solid #f87171",borderRadius:10,color:"#f87171",padding:"10px 14px",cursor:"pointer" }}>✕</button>
           </div>
         </div>
       )}
 
       {/* LOG LIST */}
-      <div style={{ fontSize:11,color:"#94a3b8",marginBottom:12 }}>{gaugeLogs.length} reading{gaugeLogs.length!==1?"s":""} logged · Kaeser Compressor-01</div>
-      {gaugeLogs.map(log=>(
+      <div style={{ fontSize:11,color:"#94a3b8",marginBottom:12 }}>{shownLogs.length} reading{shownLogs.length!==1?"s":""} logged · {selectedAsset?.name || "Unknown Asset"}</div>
+      {shownLogs.map(log=>(
         <div key={log.id} style={{ background:"rgba(255,255,255,0.65)",border:"1.5px solid rgba(124,58,237,0.1)",borderRadius:16,padding:16,marginBottom:10,backdropFilter:"blur(20px)" }}>
           <div style={{ display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:10 }}>
             <div>
