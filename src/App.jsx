@@ -672,6 +672,28 @@ async function sheetsPost(action, data, onSyncError) {
   }
 }
 
+// ─── CLOUD STATE — Sheet is the source of truth ─────────────────────────────
+// Collections synced to the Sheet's "State" tab. Photos + map image are
+// intentionally excluded (too large for Sheets cells — handled separately).
+const SYNC_KEYS = ["assets", "logs", "machines", "gaugeLogs", "workEntries", "watchItems"];
+
+async function fetchCloudState() {
+  const res = await fetch(`${SHEETS_URL}?action=getState`, { method: "GET" });
+  const json = await res.json();
+  if (!json || json.success === false) throw new Error(json?.error || "getState failed");
+  return json.state || {};
+}
+
+// Debounced per-collection push so rapid edits don't spam the endpoint.
+const _pushTimers = {};
+function pushCloudState(key, value, onSyncError) {
+  if (!SYNC_KEYS.includes(key)) return;
+  clearTimeout(_pushTimers[key]);
+  _pushTimers[key] = setTimeout(() => {
+    sheetsPost("saveState", { key, value, updatedAt: Date.now() }, onSyncError);
+  }, 1500);
+}
+
 function fromStr(s)  { return new Date(s+"T00:00:00"); }
 function addDays(d,n){ const x=new Date(d); x.setDate(x.getDate()+n); return x; }
 function dStr(d)     { return d instanceof Date ? d.toISOString().split("T")[0] : d; }
@@ -2352,11 +2374,42 @@ export default function App() {
   const [photoModal, setPhotoModal]   = useState(null); // asset to add photos to
   const [repairModal, setRepairModal] = useState(false); // inline Log Repair modal (search/create asset)
 
-  useEffect(() => { save("cbv3_assets",    assets);    }, [assets]);
-  useEffect(() => { save("cbv3_logs",      logs);      }, [logs]);
-  useEffect(() => { save("cbv3_machines",  machines);  }, [machines]);
-  useEffect(() => { save("cbv3_gaugeLogs", gaugeLogs); }, [gaugeLogs]);
-  useEffect(() => { save("cbv3_watchItems",  watchItems);  }, [watchItems]);
+  // ── CLOUD HYDRATION ──────────────────────────────────────────────────────
+  // On load: pull state from the Sheet (source of truth). localStorage is only
+  // the offline fallback. `hydrated` gates pushes so a fresh device with stale
+  // local data can't overwrite the cloud before it has pulled it down.
+  const [hydrated, setHydrated] = useState(false);
+  const [syncStatus, setSyncStatus] = useState("syncing"); // syncing | cloud | offline
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const state = await fetchCloudState();
+        if (cancelled) return;
+        if (Array.isArray(state.assets)      && state.assets.length)      setAssets(state.assets);
+        if (Array.isArray(state.logs)        && state.logs.length)        setLogs(state.logs);
+        if (Array.isArray(state.machines)    && state.machines.length)    setMachines(state.machines);
+        if (Array.isArray(state.gaugeLogs)   && state.gaugeLogs.length)   setGaugeLogs(state.gaugeLogs);
+        if (Array.isArray(state.workEntries) && state.workEntries.length) setWorkEntries(state.workEntries);
+        if (Array.isArray(state.watchItems)  && state.watchItems.length)  setWatchItems(state.watchItems);
+        setSyncStatus("cloud");
+      } catch (err) {
+        console.warn("[Cloud hydrate failed — using local cache]", err.message || err);
+        if (!cancelled) setSyncStatus("offline");
+      } finally {
+        if (!cancelled) setHydrated(true);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, []);
+
+  useEffect(() => { save("cbv3_assets",    assets);    if (hydrated) pushCloudState("assets",      assets,      showToast); }, [assets, hydrated]);
+  useEffect(() => { save("cbv3_logs",      logs);      if (hydrated) pushCloudState("logs",        logs,        showToast); }, [logs, hydrated]);
+  useEffect(() => { save("cbv3_machines",  machines);  if (hydrated) pushCloudState("machines",    machines,    showToast); }, [machines, hydrated]);
+  useEffect(() => { save("cbv3_gaugeLogs", gaugeLogs); if (hydrated) pushCloudState("gaugeLogs",   gaugeLogs,   showToast); }, [gaugeLogs, hydrated]);
+  useEffect(() => { save("cbv3_workEntries", workEntries); if (hydrated) pushCloudState("workEntries", workEntries, showToast); }, [workEntries, hydrated]);
+  useEffect(() => { save("cbv3_watchItems",  watchItems);  if (hydrated) pushCloudState("watchItems", watchItems, showToast); }, [watchItems, hydrated]);
   useEffect(() => { save("cbv3_assetPhotos", assetPhotos); }, [assetPhotos]);
 
   function showToast(m) { setToast(m); setTimeout(()=>setToast(null), 2800); }
@@ -2660,7 +2713,17 @@ export default function App() {
             <div style={S.logoBox}><span style={S.logoTxt}>CB</span></div>
             <div>
               <div style={S.appName}>Maintenance Portal</div>
-              <div style={S.appSub}>I&M Machine Shop · St. Joseph, MO</div>
+              <div style={S.appSub}>
+                I&M Machine Shop · St. Joseph, MO
+                {" "}
+                <span style={{
+                  fontSize: 10, padding: "1px 7px", borderRadius: 8, marginLeft: 6,
+                  background: syncStatus === "cloud" ? "rgba(16,185,129,.15)" : syncStatus === "offline" ? "rgba(248,113,113,.15)" : "rgba(148,163,184,.15)",
+                  color:      syncStatus === "cloud" ? "#10b981" : syncStatus === "offline" ? "#f87171" : "#94a3b8",
+                }}>
+                  {syncStatus === "cloud" ? "☁️ Synced" : syncStatus === "offline" ? "⚠ Local only" : "⟳ Syncing…"}
+                </span>
+              </div>
             </div>
           </div>
           <div style={S.statRow}>
