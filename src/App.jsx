@@ -2094,10 +2094,10 @@ function RepairModal({ assets, setAssets, setLogs, showToast, onClose }) {
 // Cost per repair = downtimeHrs × downtimeRate + laborHrs × laborRate + partsCost
 // Compares rolling 90 days vs the prior 90 days per asset.
 const DEFAULT_COST_SETTINGS = {
-  laborRate: 35,        // $/hr  [NEEDS REAL DATA]
-  downtimeRate: 250,    // $/hr  [NEEDS REAL DATA]
+  laborRate: 40,        // $/hr — CB confirmed 7/13/26: maint guys + welder blend ($35–45)
+  downtimeRate: 70,     // $/hr — CB confirmed 7/13/26: 2 idled operators × $35. WAGE FLOOR ONLY (excludes lost production)
   alertThreshold: 1000, // $ per 90 days per asset → red flag
-  ratesConfirmed: false,
+  ratesConfirmed: true,
 };
 
 function CostsTab({ assets, logs, settings, setSettings }) {
