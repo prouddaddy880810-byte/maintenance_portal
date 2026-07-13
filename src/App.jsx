@@ -1912,6 +1912,7 @@ function RepairModal({ assets, setAssets, setLogs, showToast, onClose }) {
   const [newMode,     setNewMode]     = useState(false); // creating new asset
   const [note,        setNote]        = useState("");
   const [date,        setDate]        = useState(TODAY);
+  const [costs,       setCosts]       = useState({ downtimeHrs:"", laborHrs:"", partsCost:"" }); // optional cost capture
   const [newAsset,    setNewAsset]    = useState({ name:"", location:"", category:"Equipment", detail:"", intervalDays:90, pmEnabled:true });
 
   const filtered = search.trim().length > 1
@@ -1945,7 +1946,12 @@ function RepairModal({ assets, setAssets, setLogs, showToast, onClose }) {
     } else {
       return;
     }
-    setLogs(p => [{ id: Date.now()+1, assetId, date, note: "🔧 " + note.trim(), tech:"CB" }, ...p]);
+    setLogs(p => [{
+      id: Date.now()+1, assetId, date, note: "🔧 " + note.trim(), tech:"CB",
+      downtimeHrs: parseFloat(costs.downtimeHrs) || 0,
+      laborHrs:    parseFloat(costs.laborHrs)    || 0,
+      partsCost:   parseFloat(costs.partsCost)   || 0,
+    }, ...p]);
     onClose();
   }
 
@@ -2047,6 +2053,28 @@ function RepairModal({ assets, setAssets, setLogs, showToast, onClose }) {
           />
           <Lbl>Date</Lbl>
           <input type="date" value={date} onChange={e=>setDate(e.target.value)} style={S.inp} />
+
+          {/* COST CAPTURE — optional, powers the 💰 Costs tab */}
+          <div style={{ marginTop:10, background:"rgba(16,185,129,0.05)", border:"1.5px dashed rgba(16,185,129,0.3)", borderRadius:12, padding:"10px 12px" }}>
+            <div style={{ fontSize:11, color:"#059669", fontWeight:700, letterSpacing:1, marginBottom:8 }}>💰 COST CAPTURE (optional)</div>
+            <div style={{ display:"flex", gap:8 }}>
+              <div style={{ flex:1 }}>
+                <div style={{ fontSize:10, color:"#64748b", fontWeight:700, marginBottom:3 }}>Downtime hrs</div>
+                <input type="number" inputMode="decimal" min="0" step="0.5" value={costs.downtimeHrs}
+                  onChange={e=>setCosts(p=>({...p,downtimeHrs:e.target.value}))} placeholder="0" style={{ ...S.inp, marginBottom:0 }} />
+              </div>
+              <div style={{ flex:1 }}>
+                <div style={{ fontSize:10, color:"#64748b", fontWeight:700, marginBottom:3 }}>Labor hrs</div>
+                <input type="number" inputMode="decimal" min="0" step="0.5" value={costs.laborHrs}
+                  onChange={e=>setCosts(p=>({...p,laborHrs:e.target.value}))} placeholder="0" style={{ ...S.inp, marginBottom:0 }} />
+              </div>
+              <div style={{ flex:1 }}>
+                <div style={{ fontSize:10, color:"#64748b", fontWeight:700, marginBottom:3 }}>Parts $</div>
+                <input type="number" inputMode="decimal" min="0" step="1" value={costs.partsCost}
+                  onChange={e=>setCosts(p=>({...p,partsCost:e.target.value}))} placeholder="0" style={{ ...S.inp, marginBottom:0 }} />
+              </div>
+            </div>
+          </div>
         </>
       )}
 
@@ -2057,6 +2085,136 @@ function RepairModal({ assets, setAssets, setLogs, showToast, onClose }) {
         </button>
       </div>
     </Overlay>
+  );
+}
+
+
+// ─── ASSET COST INTELLIGENCE TAB ─────────────────────────────────────────────
+// "The moment a machine starts costing you money."
+// Cost per repair = downtimeHrs × downtimeRate + laborHrs × laborRate + partsCost
+// Compares rolling 90 days vs the prior 90 days per asset.
+const DEFAULT_COST_SETTINGS = {
+  laborRate: 35,        // $/hr  [NEEDS REAL DATA]
+  downtimeRate: 250,    // $/hr  [NEEDS REAL DATA]
+  alertThreshold: 1000, // $ per 90 days per asset → red flag
+  ratesConfirmed: false,
+};
+
+function CostsTab({ assets, logs, settings, setSettings }) {
+  const now = Date.now();
+  const D90 = 90 * 24 * 60 * 60 * 1000;
+
+  const logCost = (l) =>
+    (parseFloat(l.downtimeHrs) || 0) * settings.downtimeRate +
+    (parseFloat(l.laborHrs)    || 0) * settings.laborRate +
+    (parseFloat(l.partsCost)   || 0);
+
+  const logDT = (l) => { const t = new Date(l.date).getTime(); return isNaN(t) ? 0 : t; };
+
+  // Bucket costs per asset: current 90d vs prior 90d
+  const byAsset = {};
+  for (const l of logs) {
+    const c = logCost(l);
+    if (!c) continue;
+    const t = logDT(l);
+    if (t < now - 2 * D90) continue; // older than 180d — ignore
+    const b = byAsset[l.assetId] || (byAsset[l.assetId] = { curr: 0, prior: 0, dt: 0, lab: 0, parts: 0, count: 0 });
+    if (t >= now - D90) {
+      b.curr  += c;
+      b.dt    += (parseFloat(l.downtimeHrs) || 0) * settings.downtimeRate;
+      b.lab   += (parseFloat(l.laborHrs)    || 0) * settings.laborRate;
+      b.parts += (parseFloat(l.partsCost)   || 0);
+      b.count += 1;
+    } else {
+      b.prior += c;
+    }
+  }
+
+  const rows = Object.entries(byAsset)
+    .map(([assetId, b]) => {
+      const asset = assets.find(a => String(a.id) === String(assetId));
+      let status = "green";
+      if (b.curr >= settings.alertThreshold || (b.prior > 0 && b.curr > b.prior * 1.5)) status = "red";
+      else if (b.curr > 0 && b.curr > b.prior) status = "yellow";
+      return { assetId, name: asset ? asset.name : `Asset #${assetId}`, loc: asset ? asset.location : "", ...b, status };
+    })
+    .sort((a, b) => b.curr - a.curr);
+
+  const totalCurr = rows.reduce((s, r) => s + r.curr, 0);
+  const fmt = (n) => "$" + Math.round(n).toLocaleString();
+  const COLORS = { red: "#ef4444", yellow: "#f59e0b", green: "#10b981" };
+  const num = (v) => (isNaN(parseFloat(v)) ? 0 : parseFloat(v));
+
+  return (
+    <div>
+      {/* RATE SETTINGS */}
+      <div style={{ background: "#fff", border: "1.5px solid rgba(124,58,237,0.15)", borderRadius: 16, padding: 14, marginBottom: 14 }}>
+        <div style={{ fontSize: 11, fontWeight: 800, letterSpacing: 1, color: "#7c3aed", marginBottom: 8 }}>⚙ COST RATES</div>
+        {!settings.ratesConfirmed && (
+          <div style={{ fontSize: 11, color: "#b45309", background: "rgba(245,158,11,0.1)", border: "1px solid rgba(245,158,11,0.3)", borderRadius: 8, padding: "6px 10px", marginBottom: 10 }}>
+            ⚠ Default placeholder rates — [NEEDS REAL DATA]. Edit below, then confirm.
+          </div>
+        )}
+        <div style={{ display: "flex", gap: 8 }}>
+          {[["laborRate", "Labor $/hr"], ["downtimeRate", "Downtime $/hr"], ["alertThreshold", "Red flag $/90d"]].map(([k, label]) => (
+            <div key={k} style={{ flex: 1 }}>
+              <div style={{ fontSize: 10, color: "#64748b", fontWeight: 700, marginBottom: 3 }}>{label}</div>
+              <input type="number" inputMode="decimal" value={settings[k]}
+                onChange={e => setSettings(p => ({ ...p, [k]: num(e.target.value) }))}
+                style={{ ...S.inp, marginBottom: 0 }} />
+            </div>
+          ))}
+        </div>
+        {!settings.ratesConfirmed && (
+          <button onClick={() => setSettings(p => ({ ...p, ratesConfirmed: true }))}
+            style={{ marginTop: 10, width: "100%", padding: "8px 12px", borderRadius: 10, border: "none", background: "#7c3aed", color: "#fff", fontWeight: 700, fontSize: 12, cursor: "pointer", fontFamily: "inherit" }}>
+            ✓ These rates are real — stop nagging me
+          </button>
+        )}
+      </div>
+
+      {/* TOTAL */}
+      <div style={{ background: "linear-gradient(135deg,#1e1b4b,#312e81)", borderRadius: 16, padding: "16px 18px", marginBottom: 14, color: "#fff" }}>
+        <div style={{ fontSize: 11, opacity: 0.7, fontWeight: 700, letterSpacing: 1 }}>MAINTENANCE COST — LAST 90 DAYS</div>
+        <div style={{ fontSize: 32, fontWeight: 800, marginTop: 2 }}>{fmt(totalCurr)}</div>
+        <div style={{ fontSize: 11, opacity: 0.6, marginTop: 2 }}>{rows.length} asset{rows.length === 1 ? "" : "s"} with logged costs · rates {settings.ratesConfirmed ? "confirmed" : "PLACEHOLDER"}</div>
+      </div>
+
+      {/* LEADERBOARD */}
+      {rows.length === 0 && (
+        <div style={{ background: "#fff", border: "1.5px dashed rgba(124,58,237,0.25)", borderRadius: 16, padding: 20, textAlign: "center", color: "#64748b", fontSize: 13 }}>
+          No cost data yet.<br /><br />
+          Log a repair (🔧 Log Repair) and fill in the <b>💰 Cost Capture</b> fields — downtime hours, labor hours, parts cost. This tab lights up from there.
+        </div>
+      )}
+      {rows.map(r => {
+        const trend = r.prior > 0 ? (r.curr - r.prior) / r.prior : (r.curr > 0 ? 1 : 0);
+        const arrow = trend > 0.05 ? "▲" : trend < -0.05 ? "▼" : "—";
+        const arrowColor = trend > 0.05 ? "#ef4444" : trend < -0.05 ? "#10b981" : "#94a3b8";
+        return (
+          <div key={r.assetId} style={{ background: "#fff", borderRadius: 14, padding: "12px 14px", marginBottom: 10, borderLeft: `5px solid ${COLORS[r.status]}`, boxShadow: "0 1px 4px rgba(30,27,75,0.06)" }}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline" }}>
+              <div style={{ fontWeight: 800, fontSize: 14, color: "#1e1b4b" }}>{r.name}</div>
+              <div style={{ fontWeight: 800, fontSize: 16, color: COLORS[r.status] }}>{fmt(r.curr)}</div>
+            </div>
+            <div style={{ fontSize: 11, color: "#94a3b8", marginTop: 2 }}>
+              {r.loc && <span>{r.loc} · </span>}{r.count} repair{r.count === 1 ? "" : "s"} in 90d
+              <span style={{ color: arrowColor, fontWeight: 700, marginLeft: 8 }}>{arrow} vs prior 90d ({fmt(r.prior)})</span>
+            </div>
+            <div style={{ fontSize: 11, color: "#64748b", marginTop: 6, display: "flex", gap: 12 }}>
+              <span>⏱ Downtime {fmt(r.dt)}</span>
+              <span>🔧 Labor {fmt(r.lab)}</span>
+              <span>⚙ Parts {fmt(r.parts)}</span>
+            </div>
+            {r.status === "red" && (
+              <div style={{ marginTop: 8, fontSize: 11, fontWeight: 700, color: "#ef4444", background: "rgba(239,68,68,0.07)", borderRadius: 8, padding: "5px 9px" }}>
+                🚨 This machine is costing you money — {r.curr >= settings.alertThreshold ? `over the ${fmt(settings.alertThreshold)}/90d threshold` : "costs up 50%+ vs prior 90 days"}
+              </div>
+            )}
+          </div>
+        );
+      })}
+    </div>
   );
 }
 
@@ -2463,6 +2621,7 @@ export default function App() {
   const [watchModal, setWatchModal]   = useState(null); // asset to add to watch list
   const [photoModal, setPhotoModal]   = useState(null); // asset to add photos to
   const [repairModal, setRepairModal] = useState(false); // inline Log Repair modal (search/create asset)
+  const [costSettings, setCostSettings] = useState(() => load("cbv3_costSettings", DEFAULT_COST_SETTINGS));
 
   // ── CLOUD HYDRATION ──────────────────────────────────────────────────────
   // On load: pull state from the Sheet (source of truth). localStorage is only
@@ -2501,6 +2660,7 @@ export default function App() {
   useEffect(() => { save("cbv3_workEntries", workEntries); if (hydrated) pushCloudState("workEntries", workEntries, showToast); }, [workEntries, hydrated]);
   useEffect(() => { save("cbv3_watchItems",  watchItems);  if (hydrated) pushCloudState("watchItems", watchItems, showToast); }, [watchItems, hydrated]);
   useEffect(() => { save("cbv3_assetPhotos", assetPhotos); }, [assetPhotos]);
+  useEffect(() => { save("cbv3_costSettings", costSettings); }, [costSettings]);
 
   function showToast(m) { setToast(m); setTimeout(()=>setToast(null), 2800); }
 
@@ -2572,6 +2732,7 @@ export default function App() {
     ["map",        "🗺 Facility Map"],
     ["machines",   "🏭 Machines"],
     ["gauge",      "⚡ Gauge Log"],
+    ["costs",      "💰 Costs"],
     ["history",    "PM History"],
     ["worklog",    "📋 Daily Log"],
     ["add",        "+ Add Asset"],
@@ -2911,6 +3072,11 @@ export default function App() {
         {/* GAUGE LOG TAB */}
         {tab==="gauge" && (
           <GaugeLog gaugeLogs={gaugeLogs} setGaugeLogs={setGaugeLogs} assets={assets} showToast={showToast} />
+        )}
+
+        {/* ASSET COST INTELLIGENCE */}
+        {tab==="costs" && (
+          <CostsTab assets={assets} logs={logs} settings={costSettings} setSettings={setCostSettings} />
         )}
 
         {/* DAILY WORK LOG */}
