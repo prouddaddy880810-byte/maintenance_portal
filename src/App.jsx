@@ -2089,6 +2089,87 @@ function RepairModal({ assets, setAssets, setLogs, showToast, onClose }) {
 }
 
 
+// ─── PARTS INVENTORY TAB (rough count tracker) ───────────────────────────────
+// Goal: "see how many there are when I go to get one." Tap −/+ as you take/stock.
+function PartsTab({ parts, setParts, showToast }) {
+  const [q, setQ] = useState("");
+  const [adding, setAdding] = useState(false);
+  const [form, setForm] = useState({ name: "", qty: "", min: "1", location: "" });
+
+  const bump = (id, delta) => setParts(p => p.map(x => x.id === id ? { ...x, qty: Math.max(0, (parseInt(x.qty) || 0) + delta) } : x));
+  const remove = (id) => { if (confirm("Delete this part?")) setParts(p => p.filter(x => x.id !== id)); };
+
+  function addPart() {
+    if (!form.name.trim()) return;
+    setParts(p => [{ id: Date.now(), name: form.name.trim(), qty: parseInt(form.qty) || 0, min: parseInt(form.min) || 0, location: form.location.trim() }, ...p]);
+    showToast(`📦 Added: ${form.name.trim()}`);
+    setForm({ name: "", qty: "", min: "1", location: "" });
+    setAdding(false);
+  }
+
+  const filtered = parts.filter(p => !q.trim() || p.name.toLowerCase().includes(q.toLowerCase()) || (p.location || "").toLowerCase().includes(q.toLowerCase()));
+  const sorted = [...filtered].sort((a, b) => ((a.qty <= a.min) === (b.qty <= b.min)) ? a.name.localeCompare(b.name) : (a.qty <= a.min ? -1 : 1));
+  const lowCount = parts.filter(p => (parseInt(p.qty) || 0) <= (parseInt(p.min) || 0)).length;
+
+  const btn = (bg) => ({ width: 44, height: 44, borderRadius: 12, border: "none", background: bg, color: "#fff", fontSize: 22, fontWeight: 800, cursor: "pointer", fontFamily: "inherit", flexShrink: 0 });
+
+  return (
+    <div>
+      {lowCount > 0 && (
+        <div style={{ background: "rgba(239,68,68,0.08)", border: "1.5px solid rgba(239,68,68,0.3)", borderRadius: 12, padding: "8px 12px", marginBottom: 12, fontSize: 12, fontWeight: 700, color: "#ef4444" }}>
+          🚨 {lowCount} part{lowCount === 1 ? "" : "s"} at or below minimum — reorder
+        </div>
+      )}
+
+      <div style={{ display: "flex", gap: 8, marginBottom: 12 }}>
+        <input value={q} onChange={e => setQ(e.target.value)} placeholder="Search parts..." style={{ ...S.inp, marginBottom: 0, flex: 1 }} />
+        <button onClick={() => setAdding(a => !a)} style={{ padding: "0 16px", borderRadius: 12, border: "none", background: "#7c3aed", color: "#fff", fontWeight: 800, fontSize: 13, cursor: "pointer", fontFamily: "inherit" }}>
+          {adding ? "×" : "+ Part"}
+        </button>
+      </div>
+
+      {adding && (
+        <div style={{ background: "#fff", border: "1.5px solid rgba(124,58,237,0.2)", borderRadius: 14, padding: 14, marginBottom: 12 }}>
+          <Lbl>Part name *</Lbl>
+          <input autoFocus value={form.name} onChange={e => setForm(p => ({ ...p, name: e.target.value }))} placeholder="e.g. Hydraulic hose 3/8, Kaeser oil filter" style={S.inp} />
+          <div style={{ display: "flex", gap: 8 }}>
+            <div style={{ flex: 1 }}><Lbl>Qty on hand</Lbl><input type="number" inputMode="numeric" value={form.qty} onChange={e => setForm(p => ({ ...p, qty: e.target.value }))} placeholder="0" style={S.inp} /></div>
+            <div style={{ flex: 1 }}><Lbl>Min (reorder at)</Lbl><input type="number" inputMode="numeric" value={form.min} onChange={e => setForm(p => ({ ...p, min: e.target.value }))} style={S.inp} /></div>
+          </div>
+          <Lbl>Location (shelf/bin)</Lbl>
+          <input value={form.location} onChange={e => setForm(p => ({ ...p, location: e.target.value }))} placeholder="e.g. Maint cage shelf 2" style={S.inp} />
+          <button onClick={addPart} disabled={!form.name.trim()} style={{ marginTop: 6, width: "100%", padding: "10px", borderRadius: 12, border: "none", background: form.name.trim() ? "#10b981" : "#cbd5e1", color: "#fff", fontWeight: 800, fontSize: 13, cursor: "pointer", fontFamily: "inherit" }}>
+            Save Part
+          </button>
+        </div>
+      )}
+
+      {parts.length === 0 && !adding && (
+        <div style={{ background: "#fff", border: "1.5px dashed rgba(124,58,237,0.25)", borderRadius: 16, padding: 20, textAlign: "center", color: "#64748b", fontSize: 13 }}>
+          No parts yet. Hit <b>+ Part</b> and add them as you touch them — don't try to catalog the whole cage in one sitting.
+        </div>
+      )}
+
+      {sorted.map(p => {
+        const low = (parseInt(p.qty) || 0) <= (parseInt(p.min) || 0);
+        return (
+          <div key={p.id} style={{ background: "#fff", borderRadius: 14, padding: "10px 12px", marginBottom: 8, display: "flex", alignItems: "center", gap: 10, borderLeft: `5px solid ${low ? "#ef4444" : "#10b981"}`, boxShadow: "0 1px 4px rgba(30,27,75,0.06)" }}>
+            <div style={{ flex: 1, minWidth: 0 }}>
+              <div style={{ fontWeight: 800, fontSize: 13, color: "#1e1b4b", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{p.name}</div>
+              <div style={{ fontSize: 11, color: "#94a3b8" }}>{p.location || "no location"} · min {p.min}{low ? " · 🚨 LOW" : ""}</div>
+            </div>
+            <button onClick={() => bump(p.id, -1)} style={btn("#ef4444")}>−</button>
+            <div style={{ width: 40, textAlign: "center", fontWeight: 800, fontSize: 20, color: low ? "#ef4444" : "#1e1b4b" }}>{p.qty}</div>
+            <button onClick={() => bump(p.id, +1)} style={btn("#10b981")}>+</button>
+            <button onClick={() => remove(p.id)} style={{ background: "none", border: "none", color: "#cbd5e1", fontSize: 16, cursor: "pointer", padding: "0 2px" }}>🗑</button>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+
 // ─── ASSET COST INTELLIGENCE TAB ─────────────────────────────────────────────
 // "The moment a machine starts costing you money."
 // Cost per repair = downtimeHrs × downtimeRate + laborHrs × laborRate + partsCost
@@ -2622,6 +2703,7 @@ export default function App() {
   const [photoModal, setPhotoModal]   = useState(null); // asset to add photos to
   const [repairModal, setRepairModal] = useState(false); // inline Log Repair modal (search/create asset)
   const [costSettings, setCostSettings] = useState(() => load("cbv3_costSettings", DEFAULT_COST_SETTINGS));
+  const [parts, setParts] = useState(() => load("cbv3_parts", []));
 
   // ── CLOUD HYDRATION ──────────────────────────────────────────────────────
   // On load: pull state from the Sheet (source of truth). localStorage is only
@@ -2642,6 +2724,7 @@ export default function App() {
         if (Array.isArray(state.gaugeLogs)   && state.gaugeLogs.length)   setGaugeLogs(state.gaugeLogs);
         if (Array.isArray(state.workEntries) && state.workEntries.length) setWorkEntries(state.workEntries);
         if (Array.isArray(state.watchItems)  && state.watchItems.length)  setWatchItems(state.watchItems);
+        if (Array.isArray(state.parts)       && state.parts.length)       setParts(state.parts);
         setSyncStatus("cloud");
       } catch (err) {
         console.warn("[Cloud hydrate failed — using local cache]", err.message || err);
@@ -2661,6 +2744,7 @@ export default function App() {
   useEffect(() => { save("cbv3_watchItems",  watchItems);  if (hydrated) pushCloudState("watchItems", watchItems, showToast); }, [watchItems, hydrated]);
   useEffect(() => { save("cbv3_assetPhotos", assetPhotos); }, [assetPhotos]);
   useEffect(() => { save("cbv3_costSettings", costSettings); }, [costSettings]);
+  useEffect(() => { save("cbv3_parts", parts); if (hydrated) pushCloudState("parts", parts, showToast); }, [parts, hydrated]);
 
   function showToast(m) { setToast(m); setTimeout(()=>setToast(null), 2800); }
 
@@ -2733,6 +2817,7 @@ export default function App() {
     ["machines",   "🏭 Machines"],
     ["gauge",      "⚡ Gauge Log"],
     ["costs",      "💰 Costs"],
+    ["parts",      "📦 Parts"],
     ["history",    "PM History"],
     ["worklog",    "📋 Daily Log"],
     ["add",        "+ Add Asset"],
@@ -3072,6 +3157,11 @@ export default function App() {
         {/* GAUGE LOG TAB */}
         {tab==="gauge" && (
           <GaugeLog gaugeLogs={gaugeLogs} setGaugeLogs={setGaugeLogs} assets={assets} showToast={showToast} />
+        )}
+
+        {/* PARTS INVENTORY */}
+        {tab==="parts" && (
+          <PartsTab parts={parts} setParts={setParts} showToast={showToast} />
         )}
 
         {/* ASSET COST INTELLIGENCE */}
