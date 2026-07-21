@@ -675,7 +675,7 @@ async function sheetsPost(action, data, onSyncError) {
 // ─── CLOUD STATE — Sheet is the source of truth ─────────────────────────────
 // Collections synced to the Sheet's "State" tab. Photos + map image are
 // intentionally excluded (too large for Sheets cells — handled separately).
-const SYNC_KEYS = ["assets", "logs", "machines", "gaugeLogs", "workEntries", "watchItems"];
+const SYNC_KEYS = ["assets", "logs", "machines", "gaugeLogs", "workEntries", "watchItems", "todos"];
 
 async function fetchCloudState() {
   const res = await fetch(`${SHEETS_URL}?action=getState`, { method: "GET" });
@@ -757,6 +757,46 @@ function getPM(asset, logs) {
   if (diff<0) return { label:"Overdue", color:"#f87171", days:diff, next };
   if (diff<=7) return { label:"Due soon", color:"#f59e0b", days:diff, next };
   return { label:"OK", color:"#10b981", days:diff, next };
+}
+
+// ─── WEATHER (open-meteo, free, no API key) ──────────────────────────────────
+const WX_ICON = (code) => {
+  if (code === 0) return "☀️";
+  if (code <= 2) return "🌤";
+  if (code === 3) return "☁️";
+  if (code <= 48) return "🌫";
+  if (code <= 57) return "🌦";
+  if (code <= 67) return "🌧";
+  if (code <= 77) return "🌨";
+  if (code <= 82) return "🌧";
+  if (code <= 86) return "🌨";
+  return "⛈";
+};
+
+async function fetchWeather() {
+  try {
+    const cached = JSON.parse(localStorage.getItem("cbv3_wx") || "null");
+    if (cached && Date.now() - cached.ts < 30 * 60 * 1000) return cached.wx;
+    const pos = await new Promise((res, rej) =>
+      navigator.geolocation
+        ? navigator.geolocation.getCurrentPosition(res, rej, { timeout: 8000, maximumAge: 600000 })
+        : rej(new Error("no geolocation"))
+    );
+    const { latitude, longitude } = pos.coords;
+    const r = await fetch(`https://api.open-meteo.com/v1/forecast?latitude=${latitude}&longitude=${longitude}&current=temperature_2m,weather_code&daily=temperature_2m_max,temperature_2m_min&temperature_unit=fahrenheit&forecast_days=1&timezone=auto`);
+    const d = await r.json();
+    const wx = {
+      temp: Math.round(d.current.temperature_2m),
+      code: d.current.weather_code,
+      hi: Math.round(d.daily.temperature_2m_max[0]),
+      lo: Math.round(d.daily.temperature_2m_min[0]),
+    };
+    localStorage.setItem("cbv3_wx", JSON.stringify({ ts: Date.now(), wx }));
+    return wx;
+  } catch (err) {
+    console.warn("[weather] unavailable:", err.message || err);
+    return null;
+  }
 }
 
 // ─── AI HELPERS ──────────────────────────────────────────────────────────────
@@ -1054,7 +1094,7 @@ function ConfirmDelete({ name, onConfirm, onClose }) {
 }
 
 // ─── ASSET CARD ──────────────────────────────────────────────────────────────
-function AssetCard({ asset, onLog, onPMTask, onHistory, onEdit, onDismiss, onDelete, dismissed, photos, onAddPhoto, onAddWatch }) {
+function AssetCard({ asset, onLog, onPMTask, onHistory, onEdit, onDismiss, onDelete, dismissed, photos, onAddPhoto, onAddWatch, onCycleStatus }) {
   const { pm } = asset;
   const [confirmingDelete, setConfirmingDelete] = useState(false);
   const cardPhotos = photos || [];
@@ -1071,6 +1111,16 @@ function AssetCard({ asset, onLog, onPMTask, onHistory, onEdit, onDismiss, onDel
         <div style={{ display:"flex",justifyContent:"space-between",alignItems:"flex-start" }}>
           <span style={{ fontSize:22,color:CAT_COLOR[asset.category] }}>{CAT_ICON[asset.category]}</span>
           <div style={{ display:"flex",gap:6,alignItems:"center" }}>
+            {!dismissed && onCycleStatus && (
+              <button onClick={onCycleStatus} title="Tap to cycle: OK → Down → Working On" style={{
+                fontSize:9, fontWeight:800, letterSpacing:1, padding:"3px 9px", borderRadius:20, cursor:"pointer", fontFamily:"inherit",
+                color: asset.status==="down" ? "#f87171" : asset.status==="working" ? "#f59e0b" : "#10b981",
+                background: asset.status==="down" ? "rgba(248,113,113,0.12)" : asset.status==="working" ? "rgba(245,158,11,0.12)" : "rgba(16,185,129,0.08)",
+                border: `1px solid ${asset.status==="down" ? "rgba(248,113,113,0.35)" : asset.status==="working" ? "rgba(245,158,11,0.35)" : "rgba(16,185,129,0.2)"}`,
+              }}>
+                {asset.status==="down" ? "🔴 DOWN" : asset.status==="working" ? "🔧 WORKING" : "🟢 OK"}
+              </button>
+            )}
             {dismissed && <span style={{ fontSize:9,fontWeight:800,letterSpacing:1,padding:"3px 9px",borderRadius:20,color:"#94a3b8",background:"rgba(148,163,184,0.15)",border:"1px solid rgba(148,163,184,0.3)" }}>Hidden</span>}
             {!dismissed && <span style={{ fontSize:9,fontWeight:800,letterSpacing:1,padding:"3px 9px",borderRadius:20,color:pm.color,background:pm.color+"18",border:`1px solid ${pm.color}30` }}>{pm.label}</span>}
           </div>
@@ -2722,6 +2772,7 @@ export default function App() {
   const [repairModal, setRepairModal] = useState(false); // inline Log Repair modal (search/create asset)
   const [costSettings, setCostSettings] = useState(() => load("cbv3_costSettings", DEFAULT_COST_SETTINGS));
   const [parts, setParts] = useState(() => load("cbv3_parts", []));
+  const [todos, setTodos] = useState(() => load("cbv3_todos", []));
 
   // ── CLOUD HYDRATION ──────────────────────────────────────────────────────
   // On load: pull state from the Sheet (source of truth). localStorage is only
@@ -2743,6 +2794,7 @@ export default function App() {
         if (Array.isArray(state.workEntries) && state.workEntries.length) setWorkEntries(state.workEntries);
         if (Array.isArray(state.watchItems)  && state.watchItems.length)  setWatchItems(state.watchItems);
         if (Array.isArray(state.parts)       && state.parts.length)       setParts(state.parts);
+        if (Array.isArray(state.todos)       && state.todos.length)       setTodos(state.todos);
         setSyncStatus("cloud");
       } catch (err) {
         console.warn("[Cloud hydrate failed — using local cache]", err.message || err);
@@ -2763,6 +2815,7 @@ export default function App() {
   useEffect(() => { save("cbv3_assetPhotos", assetPhotos); }, [assetPhotos]);
   useEffect(() => { save("cbv3_costSettings", costSettings); }, [costSettings]);
   useEffect(() => { save("cbv3_parts", parts); if (hydrated) pushCloudState("parts", parts, showToast); }, [parts, hydrated]);
+  useEffect(() => { save("cbv3_todos", todos); if (hydrated) pushCloudState("todos", todos, showToast); }, [todos, hydrated]);
 
   function showToast(m) { setToast(m); setTimeout(()=>setToast(null), 2800); }
 
@@ -2828,8 +2881,18 @@ export default function App() {
     { key:"intervalDays",label:"PM Interval (days)", type:"number" },
   ];
 
+  // Cycle asset operational status: ok → down → working → ok
+  const cycleStatus = (id) => {
+    setAssets(p => p.map(a => {
+      if (a.id !== id) return a;
+      const next = a.status === "down" ? "working" : a.status === "working" ? undefined : "down";
+      return { ...a, status: next };
+    }));
+  };
+
   const TABS = [
     ["dashboard",  "Dashboard"],
+    ["todos",      "📝 To-Do"],
     ["watchlist",  "👁 Watch List"],
     ["map",        "🗺 Facility Map"],
     ["machines",   "🏭 Machines"],
@@ -3104,6 +3167,7 @@ export default function App() {
         {/* DASHBOARD */}
         {tab==="dashboard" && (
           <>
+            <DashHeader todos={todos} assets={assets} onNav={setTab} />
             {overdue.length>0 && (
               <div style={S.alertBar}>
                 <span style={{ color:"#f87171",fontWeight:700,fontSize:13 }}>⚠ {overdue.length} item{overdue.length>1?"s":""} need attention</span>
@@ -3151,7 +3215,8 @@ export default function App() {
                   onDismiss={()=>dismissAsset(a.id)}
                   onDelete={()=>deleteAsset(a.id)}
                   onAddPhoto={()=>setPhotoModal(a)}
-                  onAddWatch={()=>setWatchModal(a)} />
+                  onAddWatch={()=>setWatchModal(a)}
+                  onCycleStatus={()=>cycleStatus(a.id)} />
               ))}
             </div>
           </>
@@ -3165,6 +3230,11 @@ export default function App() {
             assets={assets}
             showToast={showToast}
           />
+        )}
+
+        {/* TO-DO TAB */}
+        {tab==="todos" && (
+          <TodoList todos={todos} setTodos={setTodos} showToast={showToast} />
         )}
 
         {/* MACHINES TAB */}
@@ -3603,6 +3673,208 @@ const WORK_TAGS = [
   { label:"Other",          color:"#94a3b8" },
 ];
 
+// ─── DASHBOARD HEADER (date · weather · today's to-dos · down machines) ──────
+function DashHeader({ todos, assets, onNav }) {
+  const [wx, setWx] = useState(null);
+  useEffect(() => { let live = true; fetchWeather().then(w => { if (live) setWx(w); }); return () => { live = false; }; }, []);
+
+  const now = new Date();
+  const dayName = now.toLocaleDateString(undefined, { weekday: "long" });
+  const dateStr = now.toLocaleDateString(undefined, { month: "long", day: "numeric" });
+  const todayStr = now.toISOString().slice(0, 10);
+
+  const active = (todos || []).filter(t => !t.done);
+  const dueToday = active.filter(t => !t.due || t.due <= todayStr);
+  const downMachines = (assets || []).filter(a => a.status === "down" || a.status === "working");
+
+  return (
+    <div style={{ background:"linear-gradient(135deg,rgba(124,58,237,0.09),rgba(99,102,241,0.05))", border:"1.5px solid rgba(124,58,237,0.18)", borderRadius:20, padding:"18px 20px", marginBottom:16 }}>
+      {/* Date + weather row */}
+      <div style={{ display:"flex", justifyContent:"space-between", alignItems:"flex-start", flexWrap:"wrap", gap:10 }}>
+        <div>
+          <div style={{ fontWeight:900, fontSize:22, color:"#1e1b4b", lineHeight:1.1 }}>{dayName}</div>
+          <div style={{ fontSize:13, color:"#94a3b8", marginTop:2 }}>{dateStr}</div>
+        </div>
+        <div style={{ textAlign:"right" }}>
+          {wx ? (
+            <>
+              <div style={{ fontWeight:900, fontSize:22, color:"#1e1b4b", lineHeight:1.1 }}>{WX_ICON(wx.code)} {wx.temp}°F</div>
+              <div style={{ fontSize:11, color:"#94a3b8", marginTop:2 }}>H {wx.hi}° · L {wx.lo}°</div>
+            </>
+          ) : (
+            <div style={{ fontSize:12, color:"#cbd5e1", paddingTop:6 }}>🌡 weather —</div>
+          )}
+        </div>
+      </div>
+
+      {/* Down / working machines */}
+      {downMachines.length > 0 && (
+        <div style={{ marginTop:14, background:"rgba(248,113,113,0.07)", border:"1px solid rgba(248,113,113,0.25)", borderRadius:14, padding:"10px 12px" }}>
+          <div style={{ fontSize:10, fontWeight:800, letterSpacing:1, color:"#f87171", marginBottom:6 }}>⚠ MACHINES DOWN / BEING WORKED ON</div>
+          <div style={{ display:"flex", gap:6, flexWrap:"wrap" }}>
+            {downMachines.map(m => (
+              <span key={m.id} style={{ fontSize:12, fontWeight:700, padding:"4px 12px", borderRadius:20,
+                color: m.status==="down" ? "#f87171" : "#f59e0b",
+                background: m.status==="down" ? "rgba(248,113,113,0.12)" : "rgba(245,158,11,0.12)",
+                border: `1px solid ${m.status==="down" ? "rgba(248,113,113,0.3)" : "rgba(245,158,11,0.3)"}` }}>
+                {m.status==="down" ? "🔴" : "🔧"} {m.name}
+              </span>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* Today's to-dos */}
+      <div onClick={()=>onNav("todos")} style={{ marginTop:14, background:"rgba(255,255,255,0.55)", border:"1px solid rgba(124,58,237,0.15)", borderRadius:14, padding:"10px 12px", cursor:"pointer" }}>
+        <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom: dueToday.length ? 6 : 0 }}>
+          <div style={{ fontSize:10, fontWeight:800, letterSpacing:1, color:"#7c3aed" }}>📝 TODAY'S TO-DOS</div>
+          <div style={{ fontSize:11, fontWeight:700, color:"#7c3aed" }}>{dueToday.length} open →</div>
+        </div>
+        {dueToday.length === 0 ? (
+          <div style={{ fontSize:12, color:"#94a3b8" }}>Nothing on the list — tap to add something you don't want to forget.</div>
+        ) : dueToday.slice(0,3).map(t => (
+          <div key={t.id} style={{ display:"flex", alignItems:"center", gap:8, padding:"4px 0", fontSize:13, color:"#1e1b4b" }}>
+            <span style={{ color: t.priority==="high" ? "#f87171" : t.priority==="medium" ? "#f59e0b" : "#10b981" }}>●</span>
+            <span style={{ flex:1, overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>{t.text}</span>
+            {t.photos?.length > 0 && <span style={{ fontSize:11, color:"#94a3b8" }}>📷{t.photos.length}</span>}
+            {t.due && t.due < todayStr && <span style={{ fontSize:10, fontWeight:800, color:"#f87171" }}>OVERDUE</span>}
+          </div>
+        ))}
+        {dueToday.length > 3 && <div style={{ fontSize:11, color:"#94a3b8", marginTop:2 }}>+{dueToday.length-3} more</div>}
+      </div>
+    </div>
+  );
+}
+
+// ─── TO-DO LIST (free-form "don't forget" capture with photos) ───────────────
+function TodoList({ todos, setTodos, showToast }) {
+  const [text, setText]         = useState("");
+  const [priority, setPriority] = useState("medium");
+  const [due, setDue]           = useState("");
+  const [filter, setFilter]     = useState("active"); // active | today | done
+  const todayStr = new Date().toISOString().slice(0, 10);
+
+  const addTodo = () => {
+    const trimmed = text.trim();
+    if (!trimmed) { showToast("⚠️ Type something first"); return; }
+    const t = { id: Date.now(), text: trimmed, priority, due: due || null, photos: [], done: false, createdAt: new Date().toISOString(), doneAt: null };
+    setTodos(p => [t, ...p]);
+    setText(""); setDue("");
+    showToast("✅ Added to the list");
+  };
+
+  const toggleDone = (id) => {
+    setTodos(p => p.map(t => t.id === id ? { ...t, done: !t.done, doneAt: t.done ? null : new Date().toISOString() } : t));
+  };
+
+  const deleteTodo = (id) => { setTodos(p => p.filter(t => t.id !== id)); showToast("🗑 Removed"); };
+
+  const attachPhoto = (id, dataUrl) => {
+    // Show instantly from local, then swap for the synced Drive URL
+    setTodos(p => p.map(t => t.id === id ? { ...t, photos: [...(t.photos||[]), dataUrl] } : t));
+    showToast("📤 Uploading photo…");
+    uploadPhotoToDrive(dataUrl, `todo_${id}_${Date.now()}`).then(url => {
+      if (url) {
+        setTodos(p => p.map(t => t.id === id ? { ...t, photos: (t.photos||[]).map(ph => ph === dataUrl ? url : ph) } : t));
+        showToast("✅ Photo saved to Drive — synced");
+      } else {
+        showToast("⚠️ Drive upload failed — photo saved on this device only");
+      }
+    });
+  };
+
+  const removePhoto = (id, idx) => {
+    setTodos(p => p.map(t => t.id === id ? { ...t, photos: (t.photos||[]).filter((_,i)=>i!==idx) } : t));
+  };
+
+  const active = todos.filter(t => !t.done);
+  const done   = todos.filter(t => t.done);
+  const PRI = { high:0, medium:1, low:2 };
+  const displayed = (filter === "done" ? done
+    : filter === "today" ? active.filter(t => !t.due || t.due <= todayStr)
+    : active
+  ).slice().sort((a,b) => PRI[a.priority]-PRI[b.priority] || (a.due||"9999").localeCompare(b.due||"9999"));
+
+  const pColor = { low:"#10b981", medium:"#f59e0b", high:"#f87171" };
+  const pLabel = { low:"Low", medium:"Med", high:"HIGH" };
+
+  return (
+    <div>
+      {/* Quick capture */}
+      <div style={{ background:"linear-gradient(135deg,rgba(124,58,237,0.08),rgba(124,58,237,0.04))", border:"1.5px solid rgba(124,58,237,0.2)", borderRadius:20, padding:"18px 20px", marginBottom:20 }}>
+        <div style={{ fontWeight:800, fontSize:18, color:"#1e1b4b" }}>📝 Don't Forget</div>
+        <div style={{ fontSize:12, color:"#94a3b8", marginTop:2, marginBottom:12 }}>Dump it here before it falls out of your head</div>
+        <input value={text} onChange={e=>setText(e.target.value)} onKeyDown={e=>{ if(e.key==="Enter") addTodo(); }}
+          placeholder="e.g. Order Kaeser oil filter, check RTU-02 belt squeal..."
+          style={{ width:"100%", boxSizing:"border-box", padding:"12px 14px", background:"rgba(255,255,255,0.85)", border:"1.5px solid rgba(124,58,237,0.25)", borderRadius:12, color:"#1e1b4b", fontSize:14, fontFamily:"inherit", marginBottom:10 }} />
+        <div style={{ display:"flex", gap:8, flexWrap:"wrap", alignItems:"center" }}>
+          <select value={priority} onChange={e=>setPriority(e.target.value)} style={{ padding:"10px 12px", background:"rgba(255,255,255,0.85)", border:"1.5px solid rgba(124,58,237,0.25)", borderRadius:10, color:"#1e1b4b", fontWeight:700, fontSize:13, fontFamily:"inherit", cursor:"pointer" }}>
+            <option value="high">🔴 High</option>
+            <option value="medium">🟡 Medium</option>
+            <option value="low">🟢 Low</option>
+          </select>
+          <input type="date" value={due} onChange={e=>setDue(e.target.value)} style={{ padding:"9px 12px", background:"rgba(255,255,255,0.85)", border:"1.5px solid rgba(124,58,237,0.25)", borderRadius:10, color:"#1e1b4b", fontSize:13, fontFamily:"inherit" }} />
+          <button onClick={addTodo} style={{ flex:1, minWidth:100, padding:"11px 20px", background:"linear-gradient(135deg,#7c3aed,#a855f7)", border:"none", borderRadius:10, color:"#fff", fontWeight:800, fontSize:14, cursor:"pointer", fontFamily:"inherit" }}>+ Add</button>
+        </div>
+      </div>
+
+      {/* Filters */}
+      <div style={{ display:"flex", gap:8, marginBottom:16, flexWrap:"wrap" }}>
+        {[["active",`Active (${active.length})`],["today",`Due Today (${active.filter(t=>!t.due||t.due<=todayStr).length})`],["done",`Done (${done.length})`]].map(([k,l])=>(
+          <button key={k} onClick={()=>setFilter(k)} style={{ padding:"7px 16px", borderRadius:20, fontSize:12, fontWeight:600, cursor:"pointer", fontFamily:"inherit",
+            background: filter===k?"rgba(124,58,237,0.12)":"rgba(255,255,255,0.6)",
+            border: `1px solid ${filter===k?"rgba(124,58,237,0.4)":"rgba(124,58,237,0.12)"}`,
+            color: filter===k?"#7c3aed":"#94a3b8" }}>{l}</button>
+        ))}
+      </div>
+
+      {/* List */}
+      {displayed.length===0 && (
+        <div style={{ textAlign:"center", padding:"40px 20px", color:"#94a3b8" }}>
+          <div style={{ fontSize:32, marginBottom:10 }}>{filter==="done"?"🏁":"📝"}</div>
+          <div style={{ fontSize:13 }}>{filter==="done" ? "Nothing checked off yet." : "List is clear. Nice."}</div>
+        </div>
+      )}
+      {displayed.map(t=>(
+        <div key={t.id} style={{ background:"rgba(255,255,255,0.65)", border:`1.5px solid ${t.done?"rgba(148,163,184,0.2)":pColor[t.priority]+"35"}`, borderRadius:16, padding:14, marginBottom:10, backdropFilter:"blur(20px)", opacity:t.done?0.6:1 }}>
+          <div style={{ display:"flex", alignItems:"flex-start", gap:10 }}>
+            <button onClick={()=>toggleDone(t.id)} style={{ width:26, height:26, flexShrink:0, borderRadius:8, cursor:"pointer",
+              border:`2px solid ${t.done?"#10b981":pColor[t.priority]}`, background:t.done?"#10b981":"transparent",
+              color:"#fff", fontSize:14, fontWeight:900, lineHeight:1, marginTop:1 }}>{t.done?"✓":""}</button>
+            <div style={{ flex:1, minWidth:0 }}>
+              <div style={{ fontSize:14, fontWeight:600, color:"#1e1b4b", textDecoration:t.done?"line-through":"none", wordBreak:"break-word" }}>{t.text}</div>
+              <div style={{ display:"flex", gap:6, marginTop:6, flexWrap:"wrap", alignItems:"center" }}>
+                <span style={{ fontSize:9, fontWeight:800, letterSpacing:1, padding:"2px 8px", borderRadius:20, color:pColor[t.priority], background:pColor[t.priority]+"18", border:`1px solid ${pColor[t.priority]}30` }}>{pLabel[t.priority]}</span>
+                {t.due && <span style={{ fontSize:10, fontWeight:700, color: !t.done && t.due<todayStr ? "#f87171" : "#94a3b8" }}>📅 {t.due}{!t.done && t.due<todayStr ? " · OVERDUE" : ""}</span>}
+              </div>
+              {/* Photo strip */}
+              {(t.photos||[]).length>0 && (
+                <div style={{ display:"flex", gap:6, overflowX:"auto", marginTop:8, paddingBottom:2 }}>
+                  {t.photos.map((p,i)=>(
+                    <div key={i} style={{ position:"relative", flexShrink:0 }}>
+                      <img src={p} alt={`note ${i+1}`} style={{ width:64, height:64, objectFit:"cover", borderRadius:10, border:"1.5px solid rgba(124,58,237,0.2)" }} />
+                      <button onClick={()=>removePhoto(t.id,i)} style={{ position:"absolute", top:-6, right:-6, width:18, height:18, borderRadius:9, border:"none", background:"#f87171", color:"#fff", fontSize:10, fontWeight:900, cursor:"pointer", lineHeight:1 }}>✕</button>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+            <div style={{ display:"flex", flexDirection:"column", gap:6, flexShrink:0 }}>
+              <label style={{ padding:"4px 10px", background:"rgba(16,185,129,0.1)", border:"1px solid rgba(16,185,129,0.3)", borderRadius:6, color:"#10b981", fontSize:11, cursor:"pointer", textAlign:"center", whiteSpace:"nowrap" }}>
+                📷 Photo
+                <input type="file" accept="image/*" capture="environment" style={{ display:"none" }}
+                  onChange={e=>{ const f=e.target.files?.[0]; if(!f)return; const r=new FileReader(); r.onload=ev=>attachPhoto(t.id, ev.target.result); r.readAsDataURL(f); e.target.value=""; }} />
+              </label>
+              <button onClick={()=>deleteTodo(t.id)} style={{ padding:"4px 10px", background:"rgba(248,113,113,0.1)", border:"1px solid rgba(248,113,113,0.3)", borderRadius:6, color:"#f87171", fontSize:11, cursor:"pointer" }}>🗑</button>
+            </div>
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+// ─── DAILY WORK LOG ──────────────────────────────────────────────────────────
 function DailyWorkLog({ workEntries, setWorkEntries, showToast }) {
   const [text,     setText]     = useState("");
   const [tag,      setTag]      = useState("🔧 Repair");
