@@ -817,30 +817,27 @@ Do your best even if handwriting is messy. Include partial data rather than skip
 // JSON object or null — never throws. Callers should treat null as a failure.
 async function aiCall(prompt, base64 = null) {
   try {
-    const content = [];
-    if (base64) content.push({ type:"image", source:{ type:"base64", media_type:"image/jpeg", data:base64 }});
-    content.push({ type:"text", text:prompt });
-    const resp = await fetch("https://api.anthropic.com/v1/messages", {
-      method:"POST",
-      headers:{
-        "Content-Type":"application/json",
-        "x-api-key": import.meta.env.VITE_ANTHROPIC_API_KEY || "",
-        "anthropic-version": "2023-06-01",
-        "anthropic-dangerous-direct-browser-access": "true"
-      },
-      body: JSON.stringify({ model:"claude-sonnet-4-6", max_tokens:2000, messages:[{ role:"user", content }]})
+    const body = { prompt, maxTokens: 2000 };
+    if (base64) body.image = { data: base64, mediaType: "image/jpeg" };
+    const resp = await fetch("/api/ai", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
     });
-    const data = await resp.json();
-    // Surface auth/rate errors explicitly to the console for debugging.
+    const data = await resp.json().catch(() => ({}));
+    // Surface auth/rate/server errors explicitly for debugging.
     if (!resp.ok || data.error) {
-      console.error("[aiCall] API error:", resp.status, data.error || data);
+      console.error("[aiCall] proxy error:", resp.status, data.error || data);
       return null;
     }
-    const text = data.content?.find(b=>b.type==="text")?.text || "{}";
-    try { return JSON.parse(text.replace(/```json|```/g,"").trim()); }
-    catch { return null; }
+    const text = (data.text || "").replace(/```json|```/g, "").trim();
+    try { return JSON.parse(text); }
+    catch {
+      console.error("[aiCall] JSON parse failed. First 200 chars:", text.slice(0, 200));
+      return null;
+    }
   } catch (err) {
-    // Network error, timeout, CORS, etc.
+    // Network error, timeout, etc.
     console.error("[aiCall] fetch failed:", err.message || err);
     return null;
   }
@@ -1717,20 +1714,30 @@ function MachineCard({ machine: m, onEdit, onDelete }) {
 }
 
 // ─── GAUGE LOG TAB ───────────────────────────────────────────────────────────
-function GaugeLog({ gaugeLogs, setGaugeLogs, assets, showToast }) {
+function GaugeLog({ gaugeLogs, setGaugeLogs, assets, machines, showToast }) {
   const [scanning, setScanning] = useState(false);
   const [preview, setPreview]   = useState(null);
   const [editLog, setEditLog]   = useState(null);
 
   // Compressors (or any equipment with a gauge display) selectable for logging.
-  const gaugeAssets = assets.filter(a => /compressor/i.test(a.name || ""));
-  const pickList = gaugeAssets.length ? gaugeAssets : assets;
+  // Merge the original asset catalog with anything in the Machine DB (nameplate
+  // scans, journal imports) that looks like a compressor — matched on name,
+  // make, model, category, or description so brand-only entries like
+  // "Gardner Denver" still appear.
+  const COMP_RE = /compressor|kaeser|gardner\s*denver|atlas\s*copco|ingersoll|sullair|quincy|champion/i;
+  const gaugeAssets = assets.filter(a => COMP_RE.test(a.name || ""));
+  const machineComps = (machines || [])
+    .filter(m => COMP_RE.test(`${m.name||""} ${m.make||""} ${m.model||""} ${m.category||""} ${m.description||""}`))
+    .filter(m => !gaugeAssets.some(a => (a.name||"").trim().toLowerCase() === (m.name||"").trim().toLowerCase()))
+    .map(m => ({ id: m.id, name: m.name, location: m.location || "" }));
+  const merged = [...gaugeAssets, ...machineComps];
+  const pickList = merged.length ? merged : assets;
   const [selectedAssetId, setSelectedAssetId] = useState(() => {
     const saved = Number(localStorage.getItem("cbv3_gaugeAsset"));
     return saved || pickList[0]?.id || 11;
   });
   const selectAsset = (id) => { setSelectedAssetId(id); localStorage.setItem("cbv3_gaugeAsset", String(id)); };
-  const selectedAsset = assets.find(a => a.id === selectedAssetId);
+  const selectedAsset = merged.find(a => a.id === selectedAssetId) || assets.find(a => a.id === selectedAssetId);
 
   const handleScan = useCallback(async (base64, dataUrl) => {
     setScanning(true);
@@ -1757,7 +1764,7 @@ function GaugeLog({ gaugeLogs, setGaugeLogs, assets, showToast }) {
       notes: "", photo: preview._photo, source: "photo"
     };
     setGaugeLogs(p=>[entry,...p]);
-    sheetsPost("logGauge", { ...entry, photo: undefined, assetName: assets.find(a=>a.id===entry.assetId)?.name || "" }, showToast);
+    sheetsPost("logGauge", { ...entry, photo: undefined, assetName: (merged.find(a=>a.id===entry.assetId) || assets.find(a=>a.id===entry.assetId))?.name || "" }, showToast);
     setPreview(null);
     showToast("✅ Gauge reading logged");
     // Background: push photo to Drive, then swap base64 → URL so it syncs everywhere
@@ -1802,7 +1809,18 @@ function GaugeLog({ gaugeLogs, setGaugeLogs, assets, showToast }) {
     <div>
       {editLog && (
         <EditModal item={editLog} fields={logFields} title="Edit Gauge Reading"
-          onSave={updated=>{ setGaugeLogs(p=>p.map(l=>l.id===updated.id?updated:l)); setEditLog(null); showToast("✅ Reading updated"); }}
+          onSave={updated=>{
+            setGaugeLogs(p=>{
+              const exists = p.some(l=>l.id===updated.id);
+              // .map() alone silently drops NEW entries (manual entry bug) —
+              // must insert when the id isn't in the list yet.
+              return exists ? p.map(l=>l.id===updated.id?{...l,...updated}:l) : [updated, ...p];
+            });
+            const isNew = !gaugeLogs.some(l=>l.id===updated.id);
+            if (isNew) sheetsPost("logGauge", { ...updated, photo: undefined, assetName: (merged.find(a=>a.id===updated.assetId) || assets.find(a=>a.id===updated.assetId))?.name || "" }, showToast);
+            setEditLog(null);
+            showToast(isNew ? "✅ Reading logged" : "✅ Reading updated");
+          }}
           onClose={()=>setEditLog(null)} />
       )}
 
@@ -3156,7 +3174,7 @@ export default function App() {
 
         {/* GAUGE LOG TAB */}
         {tab==="gauge" && (
-          <GaugeLog gaugeLogs={gaugeLogs} setGaugeLogs={setGaugeLogs} assets={assets} showToast={showToast} />
+          <GaugeLog gaugeLogs={gaugeLogs} setGaugeLogs={setGaugeLogs} assets={assets} machines={machines} showToast={showToast} />
         )}
 
         {/* PARTS INVENTORY */}
