@@ -619,7 +619,8 @@ const INITIAL_GAUGE_LOGS = [
   {
     id:3, assetId:11, timestamp:"2026-06-24T07:16:00",
     pressure:108, temp:null, runHours:40056, loadHours:35202,
-    maintenanceIn:7, status:"FAULT — E403 Compressor Discharge Temp", keyMode:"Remote Start Enabled | Auto Restart Enabled",
+    maintenanceIn:7, status:"Fault", keyMode:"Remote Start Enabled | Auto Restart Enabled",
+    warning:"FAULT E403 — Compressor Discharge Temp | WARNING A602 — Compressor Discharge Temp",
     notes:"🔴 FAULT E403: Compressor Discharge Temp. ⚠️ WARNING A602: Compressor Discharge Temp. CFM=0. Service due in 7 hours. Immediate inspection required — check oil level, oil separator element, cooling fan, and air/oil cooler for blockage.", photo:null, source:"manual"
   },
   {
@@ -805,8 +806,31 @@ async function fetchWeather() {
 async function aiParseImage(base64, prompt) { return aiCall(prompt, base64); }
 
 const GAUGE_PROMPT = `Parse this compressor/equipment display and return ONLY valid JSON, no markdown:
-{"pressure":null,"temp":null,"timeDisplay":null,"status":null,"keyMode":null,"runHours":null,"loadHours":null,"maintenanceIn":null,"extraFields":{}}
+{"pressure":null,"temp":null,"timeDisplay":null,"status":null,"keyMode":null,"warning":null,"runHours":null,"loadHours":null,"maintenanceIn":null,"extraFields":{}}
+- keyMode: ONLY the key/operating mode line (e.g. "On | pA - Load", "Remote Start Enabled"). Do NOT put warnings or faults here.
+- warning: ANY warning, fault, alarm or error message shown on the display, including its code. Examples: "FAULT E403 - Compressor Discharge Temp", "WARNING A602 - Service Due". If several, join with " | ". Use null if the display shows no warning or fault.
 Fill in any values visible. Use null for anything not shown.`;
+
+// ─── WARNING LOGIC ───────────────────────────────────────────────────────────
+// A machine has an ACTIVE warning if its most recent gauge reading carries one.
+// Log a newer clean reading and the warning clears itself — no manual dismiss.
+function latestReadingFor(assetId, gaugeLogs) {
+  return (Array.isArray(gaugeLogs) ? gaugeLogs : [])
+    .filter(l => (l.assetId ?? 11) === assetId)
+    .sort((a,b) => String(b.timestamp||"").localeCompare(String(a.timestamp||"")))[0] || null;
+}
+function activeWarningFor(assetId, gaugeLogs) {
+  const l = latestReadingFor(assetId, gaugeLogs);
+  if (!l) return null;
+  const w = (l.warning || "").trim();
+  if (w) return { text: w, at: l.timestamp, severity: /fault|alarm|trip|shutdown|E\d/i.test(w) ? "fault" : "warning" };
+  if (String(l.status||"").toLowerCase() === "fault") return { text: "Status reported as FAULT", at: l.timestamp, severity: "fault" };
+  return null;
+}
+function allActiveWarnings(gaugeLogs) {
+  const ids = [...new Set((Array.isArray(gaugeLogs)?gaugeLogs:[]).map(l => l.assetId ?? 11))];
+  return ids.map(id => ({ assetId: id, w: activeWarningFor(id, gaugeLogs) })).filter(x => x.w);
+}
 
 const NAMEPLATE_PROMPT = `Parse this machine/equipment nameplate photo and return ONLY valid JSON, no markdown:
 {"make":null,"model":null,"serialNumber":null,"partNumber":null,"voltage":null,"amperage":null,"horsepower":null,"rpm":null,"phase":null,"hz":null,"weight":null,"year":null,"category":null,"description":null,"suggestedName":null,"suggestedId":null,"pmIntervalDays":null,"additionalSpecs":{}}
@@ -1117,7 +1141,7 @@ function ConfirmDelete({ name, onConfirm, onClose }) {
 }
 
 // ─── ASSET CARD ──────────────────────────────────────────────────────────────
-function AssetCard({ asset, onLog, onPMTask, onHistory, onEdit, onDismiss, onDelete, dismissed, photos, onAddPhoto, onAddWatch, onCycleStatus }) {
+function AssetCard({ asset, onLog, onPMTask, onHistory, onEdit, onDismiss, onDelete, dismissed, photos, onAddPhoto, onAddWatch, onCycleStatus, warning }) {
   const { pm } = asset;
   const [confirmingDelete, setConfirmingDelete] = useState(false);
   const cardPhotos = photos || [];
@@ -1156,6 +1180,16 @@ function AssetCard({ asset, onLog, onPMTask, onHistory, onEdit, onDismiss, onDel
         <div style={{ fontWeight:800,fontSize:15,color:"#1e1b4b",lineHeight:1.2,marginTop:2 }}>{asset.name}</div>
         <div style={{ fontSize:11,color:"#94a3b8" }}>{asset.location}</div>
         <div style={{ fontSize:12,color:"#64748b" }}>{asset.detail}</div>
+        {warning && (
+          <div style={{ background: warning.severity==="fault" ? "rgba(248,113,113,0.12)" : "rgba(245,158,11,0.1)",
+            border:`1.5px solid ${warning.severity==="fault" ? "rgba(248,113,113,0.4)" : "rgba(245,158,11,0.38)"}`,
+            borderRadius:10,padding:"7px 10px",marginTop:4 }}>
+            <div style={{ color: warning.severity==="fault" ? "#f87171" : "#f59e0b", fontSize:9,fontWeight:800,letterSpacing:1 }}>
+              {warning.severity==="fault" ? "🔴 ACTIVE FAULT" : "⚠️ ACTIVE WARNING"}
+            </div>
+            <div style={{ color:"#b91c1c",fontWeight:700,fontSize:12,marginTop:2,lineHeight:1.3 }}>{warning.text}</div>
+          </div>
+        )}
 
         {/* Photo strip */}
         {cardPhotos.length > 0 && (
@@ -1850,6 +1884,7 @@ function GaugeLog({ gaugeLogs, setGaugeLogs, assets, machines, showToast }) {
       maintenanceIn: preview.maintenanceIn,
       status: preview.status || "On Load",
       keyMode: preview.keyMode || "",
+      warning: preview.warning || "",
       notes: "", photo: preview._photo, source: "photo"
     };
     setGaugeLogs(p=>[entry,...p]);
@@ -1887,12 +1922,14 @@ function GaugeLog({ gaugeLogs, setGaugeLogs, assets, machines, showToast }) {
     { key:"maintenanceIn", label:"Maintenance In (h)", type:"number" },
     { key:"status", label:"Status", type:"select", options:["On Load","Off Load","Standby","Idle","Fault"] },
     { key:"keyMode", label:"Key Mode" },
+    { key:"warning", label:"⚠️ Warning / Fault Message (leave blank if none)", type:"textarea" },
     { key:"notes", label:"Notes", type:"textarea" },
   ];
 
   // Old readings pre-selector defaulted to Kaeser (11)
   const shownLogs = gaugeLogs.filter(l => (l.assetId ?? 11) === selectedAssetId);
   const latest = shownLogs[0];
+  const activeWarn = activeWarningFor(selectedAssetId, gaugeLogs);
 
   return (
     <div>
@@ -1911,6 +1948,21 @@ function GaugeLog({ gaugeLogs, setGaugeLogs, assets, machines, showToast }) {
             showToast(isNew ? "✅ Reading logged" : "✅ Reading updated");
           }}
           onClose={()=>setEditLog(null)} />
+      )}
+
+      {/* ACTIVE WARNING BANNER */}
+      {activeWarn && (
+        <div style={{ background: activeWarn.severity==="fault" ? "rgba(248,113,113,0.14)" : "rgba(245,158,11,0.12)",
+          border:`2px solid ${activeWarn.severity==="fault" ? "rgba(248,113,113,0.5)" : "rgba(245,158,11,0.45)"}`,
+          borderRadius:16,padding:"14px 16px",marginBottom:16 }}>
+          <div style={{ color: activeWarn.severity==="fault" ? "#f87171" : "#f59e0b", fontSize:10,fontWeight:800,letterSpacing:1 }}>
+            {activeWarn.severity==="fault" ? "🔴 ACTIVE FAULT" : "⚠️ ACTIVE WARNING"} · {selectedAsset?.name || "This machine"}
+          </div>
+          <div style={{ color:"#b91c1c",fontWeight:800,fontSize:15,marginTop:4,lineHeight:1.35 }}>{activeWarn.text}</div>
+          <div style={{ color:"#94a3b8",fontSize:11,marginTop:5 }}>
+            From the latest reading · {fmtDT(activeWarn.at)} — log a newer clean reading to clear it
+          </div>
+        </div>
       )}
 
       {/* STAT STRIP */}
@@ -1941,7 +1993,7 @@ function GaugeLog({ gaugeLogs, setGaugeLogs, assets, machines, showToast }) {
       {/* CONTROLS */}
       <div style={{ display:"flex",gap:10,marginBottom:20,flexWrap:"wrap" }}>
         <PhotoCapture onCapture={handleScan} label="📸 Scan Gauge Display" loading={scanning} />
-        <button onClick={()=>setEditLog({ id:Date.now(),assetId:selectedAssetId,timestamp:new Date().toISOString().slice(0,16),pressure:"",temp:"",runHours:"",loadHours:"",maintenanceIn:"",status:"On Load",keyMode:"",notes:"",photo:null,source:"manual" })} style={{ padding:"12px 20px",background:"rgba(255,255,255,0.7)",border:"1.5px solid rgba(124,58,237,0.2)",borderRadius:12,color:"#7c3aed",fontWeight:700,fontSize:13,cursor:"pointer" }}>
+        <button onClick={()=>setEditLog({ id:Date.now(),assetId:selectedAssetId,timestamp:new Date().toISOString().slice(0,16),pressure:"",temp:"",runHours:"",loadHours:"",maintenanceIn:"",status:"On Load",keyMode:"",warning:"",notes:"",photo:null,source:"manual" })} style={{ padding:"12px 20px",background:"rgba(255,255,255,0.7)",border:"1.5px solid rgba(124,58,237,0.2)",borderRadius:12,color:"#7c3aed",fontWeight:700,fontSize:13,cursor:"pointer" }}>
           ✍️ Manual Entry
         </button>
       </div>
@@ -1958,6 +2010,12 @@ function GaugeLog({ gaugeLogs, setGaugeLogs, assets, machines, showToast }) {
               </div>
             ))}
           </div>
+          {preview.warning && (
+            <div style={{ background:"rgba(248,113,113,0.12)",border:"2px solid rgba(248,113,113,0.45)",borderRadius:12,padding:"10px 14px",marginBottom:12 }}>
+              <div style={{ color:"#f87171",fontSize:10,fontWeight:800,letterSpacing:1 }}>⚠️ WARNING DETECTED ON DISPLAY</div>
+              <div style={{ color:"#b91c1c",fontWeight:800,fontSize:14,marginTop:3 }}>{preview.warning}</div>
+            </div>
+          )}
           {preview._photo && <img src={preview._photo} alt="gauge" style={{ width:"100%",maxHeight:100,objectFit:"cover",borderRadius:8,marginBottom:12,opacity:0.85 }} />}
           <div style={{ display:"flex",gap:8 }}>
             <button onClick={confirmLog} style={{ flex:1,background:"#10b981",border:"none",borderRadius:10,color:"#fff",padding:"10px 0",fontWeight:700,cursor:"pointer" }}>✅ Log It</button>
@@ -2004,6 +2062,12 @@ function GaugeLog({ gaugeLogs, setGaugeLogs, assets, machines, showToast }) {
               </div>
             ))}
           </div>
+          {log.warning && (
+            <div style={{ marginTop:8,background:"rgba(248,113,113,0.1)",border:"1.5px solid rgba(248,113,113,0.35)",borderRadius:10,padding:"9px 12px" }}>
+              <div style={{ color:"#f87171",fontSize:9,fontWeight:800,letterSpacing:1 }}>⚠️ WARNING / FAULT</div>
+              <div style={{ color:"#b91c1c",fontWeight:700,fontSize:13,marginTop:2 }}>{log.warning}</div>
+            </div>
+          )}
           {log.notes && <div style={{ marginTop:8,fontSize:12,color:"#64748b" }}>📝 {log.notes}</div>}
           {log.photo && <img src={log.photo} alt="gauge" style={{ width:"100%",maxHeight:100,objectFit:"cover",borderRadius:8,marginTop:10,opacity:0.8 }} />}
         </div>
@@ -3210,6 +3274,25 @@ export default function App() {
         {tab==="dashboard" && (
           <>
             <DashHeader todos={todos} assets={assets} onNav={setTab} />
+            {(() => {
+              const warns = allActiveWarnings(gaugeLogs);
+              if (!warns.length) return null;
+              const nameOf = id => (safeAssets.find(a=>a.id===id)?.name) || (machines.find(m=>m.id===id)?.name) || `Asset #${id}`;
+              const faults = warns.filter(x=>x.w.severity==="fault");
+              return (
+                <div style={{ background:"rgba(248,113,113,0.1)",border:"2px solid rgba(248,113,113,0.4)",borderRadius:16,padding:"14px 16px",marginBottom:14 }}>
+                  <div style={{ color:"#f87171",fontSize:11,fontWeight:800,letterSpacing:1,marginBottom:8 }}>
+                    🚨 {warns.length} MACHINE{warns.length>1?"S":""} REPORTING {faults.length?`${faults.length} FAULT${faults.length>1?"S":""} / `:""}WARNINGS
+                  </div>
+                  {warns.map(({assetId,w})=>(
+                    <div key={assetId} onClick={()=>setTab("gauge")} style={{ cursor:"pointer",background:"rgba(255,255,255,0.6)",border:`1px solid ${w.severity==="fault"?"rgba(248,113,113,0.35)":"rgba(245,158,11,0.35)"}`,borderRadius:10,padding:"8px 12px",marginBottom:6 }}>
+                      <div style={{ fontWeight:800,fontSize:13,color:"#1e1b4b" }}>{w.severity==="fault"?"🔴":"⚠️"} {nameOf(assetId)}</div>
+                      <div style={{ fontSize:12,color:"#b91c1c",fontWeight:600,marginTop:1,lineHeight:1.3 }}>{w.text}</div>
+                    </div>
+                  ))}
+                </div>
+              );
+            })()}
             {overdue.length>0 && (
               <div style={S.alertBar}>
                 <span style={{ color:"#f87171",fontWeight:700,fontSize:13 }}>⚠ {overdue.length} item{overdue.length>1?"s":""} need attention</span>
@@ -3258,7 +3341,8 @@ export default function App() {
                   onDelete={()=>deleteAsset(a.id)}
                   onAddPhoto={()=>setPhotoModal(a)}
                   onAddWatch={()=>setWatchModal(a)}
-                  onCycleStatus={()=>cycleStatus(a.id)} />
+                  onCycleStatus={()=>cycleStatus(a.id)}
+                  warning={activeWarningFor(a.id, gaugeLogs)} />
               ))}
             </div>
           </>
