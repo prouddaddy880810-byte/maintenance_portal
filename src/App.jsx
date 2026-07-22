@@ -6,6 +6,7 @@ const DATA_VERSION = "v2-journal-2026-06-29"; // bump this to trigger migration 
 
 const CAT_COLOR = { Filter:"#7c3aed", Equipment:"#38bdf8", Electrical:"#f87171", Asset:"#f59e0b", Safety:"#34d399", Machine:"#a855f7" };
 const CAT_ICON  = { Filter:"⚙", Equipment:"⬡", Electrical:"⚡", Asset:"◎", Safety:"⬟", Machine:"🏭" };
+const ALL_CATS  = ["Machine","Equipment","Electrical","Asset","Safety","Filter"];
 
 const INITIAL_ASSETS = [
   { id:1,  name:"Upstairs Back Trane",   location:"Upstairs",        category:"Filter",    detail:"20×25×2",        intervalDays:30,  pmEnabled:true  },
@@ -1030,6 +1031,26 @@ function PhotoCapture({ onCapture, label="📸 Scan", loading=false, accept="ima
 }
 
 // ─── EDIT MODAL (generic) ────────────────────────────────────────────────────
+// ─── TAG CHIPS (multi-category picker) ───────────────────────────────────────
+function TagChips({ value=[], onChange, exclude }) {
+  const toggle = (c) => onChange(value.includes(c) ? value.filter(t=>t!==c) : [...value, c]);
+  return (
+    <div style={{ display:"flex",flexWrap:"wrap",gap:6,marginTop:6,marginBottom:4 }}>
+      {ALL_CATS.filter(c=>c!==exclude).map(c=>{
+        const on = value.includes(c);
+        return (
+          <button key={c} type="button" onClick={()=>toggle(c)} style={{ padding:"5px 12px",borderRadius:20,fontSize:11,fontWeight:700,cursor:"pointer",fontFamily:"inherit",
+            background: on ? (CAT_COLOR[c]+"22") : "rgba(255,255,255,0.7)",
+            border:`1.5px solid ${on ? CAT_COLOR[c] : "rgba(148,163,184,0.3)"}`,
+            color: on ? CAT_COLOR[c] : "#94a3b8" }}>
+            {CAT_ICON[c]} {c}{on ? " ✓" : ""}
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
 function EditModal({ item, fields, title, onSave, onClose }) {
   const [form, setForm] = useState({...item});
   const set = (k,v) => setForm(f=>({...f,[k]:v}));
@@ -1047,6 +1068,8 @@ function EditModal({ item, fields, title, onSave, onClose }) {
               <select value={form[f.key]||""} onChange={e=>set(f.key,e.target.value)} style={S.inp}>
                 {f.options.map(o=><option key={o} value={o}>{o}</option>)}
               </select>
+            ) : f.type==="tags" ? (
+              <TagChips value={form[f.key]||[]} onChange={v=>set(f.key,v)} exclude={form.category} />
             ) : f.type==="textarea" ? (
               <textarea value={form[f.key]||""} onChange={e=>set(f.key,e.target.value)} rows={3} style={{...S.inp,resize:"vertical"}} />
             ) : f.type==="checkbox" ? (
@@ -1109,7 +1132,12 @@ function AssetCard({ asset, onLog, onPMTask, onHistory, onEdit, onDismiss, onDel
       )}
       <div style={{ background: dismissed ? "rgba(255,255,255,0.35)" : "rgba(255,255,255,0.65)", border:`1.5px solid ${dismissed ? "rgba(148,163,184,0.2)" : pm.color+"30"}`, borderRadius:20, padding:18, backdropFilter:"blur(24px)", WebkitBackdropFilter:"blur(24px)", boxShadow:`0 4px 24px ${pm.color}12, inset 0 1px 0 rgba(255,255,255,0.9)`, display:"flex",flexDirection:"column",gap:6, opacity: dismissed ? 0.65 : 1 }}>
         <div style={{ display:"flex",justifyContent:"space-between",alignItems:"flex-start" }}>
-          <span style={{ fontSize:22,color:CAT_COLOR[asset.category] }}>{CAT_ICON[asset.category]}</span>
+          <span style={{ display:"flex",alignItems:"center",gap:4 }}>
+            <span style={{ fontSize:22,color:CAT_COLOR[asset.category] }}>{CAT_ICON[asset.category]}</span>
+            {(asset.tags||[]).filter(t=>t!==asset.category).map(t=>(
+              <span key={t} title={t} style={{ fontSize:13,color:CAT_COLOR[t]||"#94a3b8",opacity:0.85 }}>{CAT_ICON[t]||"◦"}</span>
+            ))}
+          </span>
           <div style={{ display:"flex",gap:6,alignItems:"center" }}>
             {!dismissed && onCycleStatus && (
               <button onClick={onCycleStatus} title="Tap to cycle: OK → Down → Working On" style={{
@@ -1188,6 +1216,7 @@ const MACHINE_EDIT_FIELDS = [
   { key:"phase",         label:"Phase" },
   { key:"year",          label:"Year" },
   { key:"category",      label:"Category", type:"select", options:["Machine","Equipment","Electrical","Asset","Safety","Filter"] },
+  { key:"tags",          label:"Also Tagged As (tap to toggle)", type:"tags" },
   { key:"pmIntervalDays",label:"PM Interval (days)", type:"number" },
   { key:"description",   label:"Notes / Description", type:"textarea" },
 ];
@@ -1311,9 +1340,9 @@ function MachineDB({ machines, setMachines, showToast }) {
     showToast(`✅ Photo & data added to "${target.name}"`);
   };
 
-  const cats     = ["All", ...Array.from(new Set(machines.map(m => m.category || "Machine")))];
+  const cats     = ["All", ...Array.from(new Set(machines.flatMap(m => [m.category || "Machine", ...(m.tags||[])])))];
   const filtered = machines
-    .filter(m => filter === "All" || (m.category || "Machine") === filter)
+    .filter(m => filter === "All" || [m.category || "Machine", ...(m.tags||[])].includes(filter))
     .filter(m => !search || m.name?.toLowerCase().includes(search.toLowerCase()) || m.make?.toLowerCase().includes(search.toLowerCase()) || m.assetTag?.toLowerCase().includes(search.toLowerCase()));
 
   // ── DECISION SCREEN: what do we do with this scan? ──
@@ -1523,6 +1552,7 @@ function NewAssetForm({ preview, onConfirm, onBack }) {
     assetTag: preview.suggestedId   || "",
     location: "",
     category: preview.category      || "Machine",
+    tags:     [],
     pmIntervalDays: preview.pmIntervalDays || "",
   });
   const set = (k,v) => setForm(f=>({...f,[k]:v}));
@@ -1553,6 +1583,10 @@ function NewAssetForm({ preview, onConfirm, onBack }) {
           <div style={{ fontSize:11,color:"#94a3b8",marginBottom:4,fontWeight:600 }}>PM Interval (days)</div>
           <input type="number" value={form.pmIntervalDays} onChange={e=>set("pmIntervalDays",e.target.value)} placeholder="e.g. 90" style={S.inp} />
         </div>
+      </div>
+      <div style={{ marginBottom:10 }}>
+        <div style={{ fontSize:11,color:"#94a3b8",marginBottom:4,fontWeight:600 }}>Also Tagged As (optional)</div>
+        <TagChips value={form.tags||[]} onChange={v=>set("tags",v)} exclude={form.category} />
       </div>
       <div style={{ display:"flex",gap:8,marginTop:4 }}>
         <button onClick={()=>onConfirm(form)} disabled={!form.name.trim()} style={{ flex:1,padding:"12px 0",background:"linear-gradient(135deg,#7c3aed,#a855f7)",border:"none",borderRadius:12,color:"#fff",fontWeight:800,fontSize:14,cursor:form.name.trim()?"pointer":"not-allowed",opacity:form.name.trim()?1:0.5 }}>
@@ -1729,7 +1763,12 @@ function MachineCard({ machine: m, onEdit, onDelete }) {
           <div style={{ fontWeight:800,fontSize:15,color:"#1e1b4b" }}>{m.name}</div>
           <div style={{ fontSize:11,color:"#a855f7",fontWeight:600,marginTop:1 }}>{m.assetTag}</div>
         </div>
-        <Badge label={m.category||"Machine"} color={CAT_COLOR[m.category]||"#a855f7"} />
+        <div style={{ display:"flex",gap:4,flexWrap:"wrap",justifyContent:"flex-end" }}>
+          <Badge label={m.category||"Machine"} color={CAT_COLOR[m.category]||"#a855f7"} />
+          {(m.tags||[]).filter(t=>t!==m.category).map(t=>(
+            <Badge key={t} label={t} color={CAT_COLOR[t]||"#94a3b8"} />
+          ))}
+        </div>
       </div>
       {m.location && <div style={{ fontSize:11,color:"#94a3b8",marginBottom:4 }}>📍 {m.location}</div>}
       <div style={{ fontSize:12,color:"#64748b",marginBottom:8 }}>{[m.make,m.model].filter(Boolean).join(" ") || "—"}</div>
@@ -2764,7 +2803,7 @@ export default function App() {
     return localStorage.getItem("cbv3_dataVersion") !== DATA_VERSION;
   });
   const [showHidden, setShowHidden] = useState(false);
-  const [addForm,    setForm]       = useState({ name:"",location:"",category:"Filter",detail:"",intervalDays:30,pmEnabled:true });
+  const [addForm,    setForm]       = useState({ name:"",location:"",category:"Filter",detail:"",intervalDays:30,pmEnabled:true,tags:[] });
   const [watchItems, setWatchItems]   = useState(() => load("cbv3_watchItems", INITIAL_WATCH_ITEMS));
   const [assetPhotos, setAssetPhotos] = useState(() => load("cbv3_assetPhotos", {}));
   const [watchModal, setWatchModal]   = useState(null); // asset to add to watch list
@@ -2854,7 +2893,7 @@ export default function App() {
     setAssets(p=>[...p,{ ...addForm,id:Date.now(),intervalDays:addForm.pmEnabled?parseInt(addForm.intervalDays)||30:null }]);
     showToast(`✓ Added: ${addForm.name}`);
     setAdd(false);
-    setForm({ name:"",location:"",category:"Filter",detail:"",intervalDays:30,pmEnabled:true });
+    setForm({ name:"",location:"",category:"Filter",detail:"",intervalDays:30,pmEnabled:true,tags:[] });
   }
 
   function dismissAsset(id) { setAssets(p=>(Array.isArray(p)?p:[]).map(a=>a.id===id?{...a,dismissed:!a.dismissed}:a)); }
@@ -2866,16 +2905,17 @@ export default function App() {
   const overdue  = enriched.filter(a=>a.pm.label==="Overdue"||a.pm.label==="Never logged");
   const dueSoon  = enriched.filter(a=>a.pm.label==="Due soon");
   const ok       = enriched.filter(a=>a.pm.label==="OK");
-  const cats     = ["All",...Array.from(new Set(safeAssets.map(a=>a.category)))];
+  const cats     = ["All",...Array.from(new Set(safeAssets.flatMap(a=>[a.category,...(a.tags||[])].filter(Boolean))))];
   const sorted   = [...enriched].sort((a,b)=>{ const o={"Never logged":0,"Overdue":1,"Due soon":2,"OK":3,"Log only":4}; return o[a.pm.label]-o[b.pm.label]; });
   const visibleSorted = showHidden ? sorted : sorted.filter(a=>!a.dismissed);
-  const displayed = catFilter==="All" ? visibleSorted : visibleSorted.filter(a=>a.category===catFilter);
+  const displayed = catFilter==="All" ? visibleSorted : visibleSorted.filter(a=>[a.category,...(a.tags||[])].includes(catFilter));
   const hiddenCount = enriched.filter(a=>a.dismissed).length;
 
   const assetEditFields = [
     { key:"name",        label:"Name" },
     { key:"location",    label:"Location" },
     { key:"category",    label:"Category", type:"select", options:["Filter","Equipment","Electrical","Asset","Safety","Machine"] },
+    { key:"tags",        label:"Also Tagged As (tap to toggle)", type:"tags" },
     { key:"detail",      label:"Detail / Notes" },
     { key:"pmEnabled",   label:"Has PM Schedule", type:"checkbox", checkLabel:"Enable PM schedule" },
     { key:"intervalDays",label:"PM Interval (days)", type:"number" },
@@ -3062,6 +3102,8 @@ export default function App() {
           <select value={addForm.category} onChange={e=>setForm(p=>({...p,category:e.target.value}))} style={S.inp}>
             {["Filter","Equipment","Electrical","Asset","Safety","Machine"].map(c=><option key={c}>{c}</option>)}
           </select>
+          <Lbl>Also Tagged As (optional)</Lbl>
+          <TagChips value={addForm.tags||[]} onChange={v=>setForm(p=>({...p,tags:v}))} exclude={addForm.category} />
           <Lbl>Detail</Lbl>
           <input value={addForm.detail} onChange={e=>setForm(p=>({...p,detail:e.target.value}))} placeholder="e.g. 16×20×1" style={S.inp} />
           <div style={{ display:"flex",alignItems:"center",gap:10,marginTop:14 }}>
