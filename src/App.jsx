@@ -3752,6 +3752,11 @@ function TodoList({ todos, setTodos, showToast }) {
   const [priority, setPriority] = useState("medium");
   const [due, setDue]           = useState("");
   const [filter, setFilter]     = useState("active"); // active | today | done
+  const [sortMode, setSortMode] = useState("manual"); // manual | priority
+  const [editId, setEditId]     = useState(null);
+  const [editText, setEditText] = useState("");
+  const [editPri, setEditPri]   = useState("medium");
+  const [editDue, setEditDue]   = useState("");
   const todayStr = new Date().toISOString().slice(0, 10);
 
   const addTodo = () => {
@@ -3787,13 +3792,40 @@ function TodoList({ todos, setTodos, showToast }) {
     setTodos(p => p.map(t => t.id === id ? { ...t, photos: (t.photos||[]).filter((_,i)=>i!==idx) } : t));
   };
 
+  const startEdit = (t) => { setEditId(t.id); setEditText(t.text); setEditPri(t.priority); setEditDue(t.due || ""); };
+  const cancelEdit = () => { setEditId(null); setEditText(""); };
+  const saveEdit = () => {
+    const v = editText.trim();
+    if (!v) { showToast("⚠️ Text can't be empty"); return; }
+    setTodos(p => p.map(t => t.id === editId ? { ...t, text: v, priority: editPri, due: editDue || null } : t));
+    setEditId(null); setEditText("");
+    showToast("✏️ Updated");
+  };
+
   const active = todos.filter(t => !t.done);
   const done   = todos.filter(t => t.done);
   const PRI = { high:0, medium:1, low:2 };
-  const displayed = (filter === "done" ? done
+  const baseList = (filter === "done" ? done
     : filter === "today" ? active.filter(t => !t.due || t.due <= todayStr)
-    : active
-  ).slice().sort((a,b) => PRI[a.priority]-PRI[b.priority] || (a.due||"9999").localeCompare(b.due||"9999"));
+    : active);
+  const displayed = sortMode === "priority"
+    ? baseList.slice().sort((a,b) => PRI[a.priority]-PRI[b.priority] || (a.due||"9999").localeCompare(b.due||"9999"))
+    : baseList;
+
+  const moveTodo = (id, dir) => {
+    const ids = displayed.map(t => t.id);
+    const pos = ids.indexOf(id);
+    const neighborId = ids[pos + dir];
+    if (neighborId === undefined) return;
+    setTodos(p => {
+      const arr = [...p];
+      const i = arr.findIndex(t => t.id === id);
+      const j = arr.findIndex(t => t.id === neighborId);
+      if (i < 0 || j < 0) return p;
+      [arr[i], arr[j]] = [arr[j], arr[i]];
+      return arr;
+    });
+  };
 
   const pColor = { low:"#10b981", medium:"#f59e0b", high:"#f87171" };
   const pLabel = { low:"Low", medium:"Med", high:"HIGH" };
@@ -3826,6 +3858,11 @@ function TodoList({ todos, setTodos, showToast }) {
             border: `1px solid ${filter===k?"rgba(124,58,237,0.4)":"rgba(124,58,237,0.12)"}`,
             color: filter===k?"#7c3aed":"#94a3b8" }}>{l}</button>
         ))}
+        <button onClick={()=>setSortMode(m=>m==="manual"?"priority":"manual")} title="Toggle between your custom order and auto-sort by priority"
+          style={{ marginLeft:"auto", padding:"7px 14px", borderRadius:20, fontSize:12, fontWeight:700, cursor:"pointer", fontFamily:"inherit",
+            background:"rgba(124,58,237,0.08)", border:"1px solid rgba(124,58,237,0.25)", color:"#7c3aed" }}>
+          {sortMode==="manual" ? "↕️ My Order" : "⚡ Priority Sort"}
+        </button>
       </div>
 
       {/* List */}
@@ -3842,7 +3879,25 @@ function TodoList({ todos, setTodos, showToast }) {
               border:`2px solid ${t.done?"#10b981":pColor[t.priority]}`, background:t.done?"#10b981":"transparent",
               color:"#fff", fontSize:14, fontWeight:900, lineHeight:1, marginTop:1 }}>{t.done?"✓":""}</button>
             <div style={{ flex:1, minWidth:0 }}>
+              {editId === t.id ? (
+                <div>
+                  <input value={editText} onChange={e=>setEditText(e.target.value)} autoFocus
+                    onKeyDown={e=>{ if(e.key==="Enter") saveEdit(); if(e.key==="Escape") cancelEdit(); }}
+                    style={{ width:"100%", boxSizing:"border-box", padding:"9px 12px", background:"rgba(255,255,255,0.95)", border:"1.5px solid rgba(124,58,237,0.4)", borderRadius:10, color:"#1e1b4b", fontSize:14, fontFamily:"inherit", marginBottom:8 }} />
+                  <div style={{ display:"flex", gap:6, flexWrap:"wrap", alignItems:"center" }}>
+                    <select value={editPri} onChange={e=>setEditPri(e.target.value)} style={{ padding:"7px 10px", background:"rgba(255,255,255,0.95)", border:"1.5px solid rgba(124,58,237,0.25)", borderRadius:8, color:"#1e1b4b", fontWeight:700, fontSize:12, fontFamily:"inherit", cursor:"pointer" }}>
+                      <option value="high">🔴 High</option>
+                      <option value="medium">🟡 Medium</option>
+                      <option value="low">🟢 Low</option>
+                    </select>
+                    <input type="date" value={editDue} onChange={e=>setEditDue(e.target.value)} style={{ padding:"6px 10px", background:"rgba(255,255,255,0.95)", border:"1.5px solid rgba(124,58,237,0.25)", borderRadius:8, color:"#1e1b4b", fontSize:12, fontFamily:"inherit" }} />
+                    <button onClick={saveEdit} style={{ padding:"7px 14px", background:"linear-gradient(135deg,#7c3aed,#a855f7)", border:"none", borderRadius:8, color:"#fff", fontWeight:800, fontSize:12, cursor:"pointer", fontFamily:"inherit" }}>Save</button>
+                    <button onClick={cancelEdit} style={{ padding:"7px 12px", background:"rgba(148,163,184,0.12)", border:"1px solid rgba(148,163,184,0.3)", borderRadius:8, color:"#64748b", fontWeight:700, fontSize:12, cursor:"pointer", fontFamily:"inherit" }}>Cancel</button>
+                  </div>
+                </div>
+              ) : (
               <div style={{ fontSize:14, fontWeight:600, color:"#1e1b4b", textDecoration:t.done?"line-through":"none", wordBreak:"break-word" }}>{t.text}</div>
+              )}
               <div style={{ display:"flex", gap:6, marginTop:6, flexWrap:"wrap", alignItems:"center" }}>
                 <span style={{ fontSize:9, fontWeight:800, letterSpacing:1, padding:"2px 8px", borderRadius:20, color:pColor[t.priority], background:pColor[t.priority]+"18", border:`1px solid ${pColor[t.priority]}30` }}>{pLabel[t.priority]}</span>
                 {t.due && <span style={{ fontSize:10, fontWeight:700, color: !t.done && t.due<todayStr ? "#f87171" : "#94a3b8" }}>📅 {t.due}{!t.done && t.due<todayStr ? " · OVERDUE" : ""}</span>}
@@ -3860,6 +3915,13 @@ function TodoList({ todos, setTodos, showToast }) {
               )}
             </div>
             <div style={{ display:"flex", flexDirection:"column", gap:6, flexShrink:0 }}>
+              {sortMode==="manual" && !t.done && (
+                <div style={{ display:"flex", gap:4 }}>
+                  <button onClick={()=>moveTodo(t.id,-1)} title="Move up" style={{ flex:1, padding:"4px 8px", background:"rgba(124,58,237,0.08)", border:"1px solid rgba(124,58,237,0.25)", borderRadius:6, color:"#7c3aed", fontSize:12, fontWeight:800, cursor:"pointer", lineHeight:1 }}>↑</button>
+                  <button onClick={()=>moveTodo(t.id,1)} title="Move down" style={{ flex:1, padding:"4px 8px", background:"rgba(124,58,237,0.08)", border:"1px solid rgba(124,58,237,0.25)", borderRadius:6, color:"#7c3aed", fontSize:12, fontWeight:800, cursor:"pointer", lineHeight:1 }}>↓</button>
+                </div>
+              )}
+              <button onClick={()=>startEdit(t)} style={{ padding:"4px 10px", background:"rgba(124,58,237,0.08)", border:"1px solid rgba(124,58,237,0.25)", borderRadius:6, color:"#7c3aed", fontSize:11, cursor:"pointer", whiteSpace:"nowrap" }}>✏️ Edit</button>
               <label style={{ padding:"4px 10px", background:"rgba(16,185,129,0.1)", border:"1px solid rgba(16,185,129,0.3)", borderRadius:6, color:"#10b981", fontSize:11, cursor:"pointer", textAlign:"center", whiteSpace:"nowrap" }}>
                 📷 Photo
                 <input type="file" accept="image/*" capture="environment" style={{ display:"none" }}
